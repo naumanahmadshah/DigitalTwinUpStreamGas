@@ -1,0 +1,73 @@
+# Jobs — data generation (the "setup" job) and the post-medallion surfaces + Lakebase seed.
+# All run on serverless. Paths are relative to this file (resources/), hence ../generator, ../serving.
+# The --config argument points at the YAML synced to the workspace files path; the generator derives
+# its module directory from the config path's parent, so config/ and generator/ sit at the bundle root.
+resources:
+  jobs:
+    # ---- Data generation -------------------------------------------------------------------
+    # Phase 1 builds the semantic backbone (the tag-registry contract: tag -> asset -> functional
+    # location + cross-system ids). Phase 2 backfills ~2 years of telemetry/events and writes the
+    # batch/reference/file sources onto the landing tables and the landing volume.
+    setup:
+      name: "[${var.catalog}.${var.schema}] Gas Twin - Setup (data generation)"
+      description: One-time data generation. Backbone + telemetry/event backfill + batch/file sources.
+      tasks:
+        - task_key: semantic_backbone
+          spark_python_task:
+            python_file: ../generator/write_backbone.py
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--config", "${workspace.file_path}/config/twin_config.yaml"]
+          environment_key: gen_env
+        - task_key: telemetry_backfill
+          depends_on: [{task_key: semantic_backbone}]
+          spark_python_task:
+            python_file: ../generator/run_generator.py
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--config", "${workspace.file_path}/config/twin_config.yaml", "--mode", "backfill"]
+          environment_key: gen_env
+        - task_key: batch_sources
+          depends_on: [{task_key: semantic_backbone}]
+          spark_python_task:
+            python_file: ../generator/run_generator.py
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--config", "${workspace.file_path}/config/twin_config.yaml", "--mode", "batch"]
+          environment_key: gen_env
+      environments:
+        - environment_key: gen_env
+          spec:
+            client: "3"
+            dependencies: ["pyyaml"]
+
+    # ---- Surfaces: Genie space + AI/BI dashboard over the gold marts -----------------------
+    surfaces:
+      name: "[${var.catalog}.${var.schema}] Gas Twin - Surfaces (Genie + dashboard)"
+      description: Builds the curated Genie space and the AI/BI dashboard. Run after the medallion.
+      tasks:
+        - task_key: genie_space
+          spark_python_task:
+            python_file: ../serving/build_genie.py
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}"]
+          environment_key: surfaces_env
+        - task_key: dashboard
+          spark_python_task:
+            python_file: ../serving/build_dashboard.py
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}"]
+          environment_key: surfaces_env
+      environments:
+        - environment_key: surfaces_env
+          spec:
+            client: "3"
+            dependencies: ["databricks-sdk"]
+
+    # ---- Lakebase seed: create the write-back table + grant the app service principal -------
+    lakebase_seed:
+      name: "[${var.catalog}.${var.schema}] Gas Twin - Lakebase seed"
+      description: Seeds the Lakebase recommendation-decisions table and grants the app SP. Run after the app exists.
+      tasks:
+        - task_key: seed
+          spark_python_task:
+            python_file: ../serving/setup_lakebase.py
+            parameters: ["--instance", "${var.db_instance}", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--app-name", "${var.app_name}"]
+          environment_key: lakebase_env
+      environments:
+        - environment_key: lakebase_env
+          spec:
+            client: "3"
+            dependencies: ["databricks-sdk", "psycopg[binary]"]

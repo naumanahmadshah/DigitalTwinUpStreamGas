@@ -1,0 +1,14 @@
+command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+env:
+  - name: TWIN_CATALOG
+    value: "__CATALOG__"
+  - name: TWIN_SCHEMA
+    value: "__SCHEMA__"
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: "warehouse"
+  - name: TWIN_DB_INSTANCE
+    value: "__DB_INSTANCE__"
+  - name: TWIN_PGHOST
+    value: "__PGHOST__"
+  - name: TWIN_GENIE_SPACE
+    value: "__GENIE_SPACE__"

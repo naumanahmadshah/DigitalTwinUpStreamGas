@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gas Upstream Digital Twin - Architecture</title>
+<style>
+  :root{
+    --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#f8fafc; --card:#ffffff;
+    --gen:#6d28d9; --land:#475569; --bronze:#b45309; --silver:#6b7280; --gold:#ca8a04; --serve:#059669;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       line-height:1.45}
+  .wrap{max-width:1580px;margin:0 auto;padding:28px 20px 40px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 22px;max-width:980px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 18px;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  /* left-to-right flow */
+  .flow{display:flex;align-items:stretch;gap:0;overflow-x:auto;padding:6px 2px 16px}
+  .stage{min-width:200px;flex:1 1 0;background:var(--card);border:1px solid var(--line);
+         border-radius:12px;box-shadow:0 1px 2px rgba(15,23,42,.05);display:flex;flex-direction:column;overflow:hidden}
+  .cap{padding:11px 13px;color:#fff}
+  .cap .n{font-size:9px;letter-spacing:.14em;text-transform:uppercase;opacity:.85}
+  .cap .t{font-size:15px;font-weight:700;margin-top:1px}
+  .cap .d{font-size:11px;opacity:.9;margin-top:3px}
+  .body{padding:11px;display:flex;flex-direction:column;gap:8px;flex:1}
+  .card{border:1px solid var(--line);border-left:3px solid var(--ac);border-radius:8px;padding:8px 10px;background:#fff}
+  .card .ct{font-size:12.5px;font-weight:600}
+  .card .cd{font-size:11px;color:var(--muted);margin-top:2px}
+  .arrow{display:flex;align-items:center;justify-content:center;min-width:22px;color:#94a3b8;font-size:24px;font-weight:700;flex:0 0 auto}
+
+  .spine{margin:14px 0 0;border:1px dashed #cbd5e1;border-radius:12px;background:#fff;padding:14px 16px;display:flex;gap:14px;align-items:flex-start}
+  .spine .k{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0f172a;color:#e2e8f0;
+            border-radius:7px;padding:7px 11px;font-size:13px;white-space:nowrap}
+  .spine .x{font-size:12.5px;color:var(--muted)}
+  .spine .x b{color:var(--ink)}
+
+  .notes{margin-top:20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+  .note{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px}
+  .note h4{margin:0 0 5px;font-size:12.5px}
+  .note p{margin:0;font-size:11.5px;color:var(--muted)}
+  footer{margin-top:24px;color:var(--muted);font-size:11px;text-align:center}
+  @media (max-width:900px){.flow{flex-direction:column}.arrow{min-width:0;height:26px;transform:rotate(90deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Gas Upstream Digital Twin - Architecture</h1>
+  <p class="sub">Data flows left to right: synthetic OT and IT sources are generated into Unity Catalog,
+  refined through a bronze - silver - gold medallion (serverless Lakeflow / DLT), and served to a
+  single-page application, a Genie space and an AI/BI dashboard. Every emitter is driven by one seeded
+  field state, so the marts reconcile across production, reliability, emissions and commercial views.</p>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--gen)"></i>Generation (serverless job)</span>
+    <span><i class="dot" style="background:var(--land)"></i>Landing (Unity Catalog)</span>
+    <span><i class="dot" style="background:var(--bronze)"></i>Bronze (raw)</span>
+    <span><i class="dot" style="background:var(--silver)"></i>Silver (conformed)</span>
+    <span><i class="dot" style="background:var(--gold)"></i>Gold (curated marts)</span>
+    <span><i class="dot" style="background:var(--serve)"></i>Serving and consumption</span>
+  </div>
+
+  <div class="flow">
+
+    <!-- 1. Generation -->
+    <div class="stage">
+      <div class="cap" style="background:var(--gen)">
+        <div class="n">Step 1</div><div class="t">Data generation</div>
+        <div class="d">Serverless job &middot; writes directly to the catalog</div>
+      </div>
+      <div class="body" style="--ac:var(--gen)">
+        <div class="card"><div class="ct">Semantic backbone</div><div class="cd">tag &rarr; asset &rarr; functional location, plus cross-system ids. 922 assets, 5,561 tags, 500 wells.</div></div>
+        <div class="card"><div class="ct">Telemetry + event backfill</div><div class="cd">~2 years of process, vibration, CEMS and custody signals. 4.5M rows + 358K events.</div></div>
+        <div class="card"><div class="ct">Batch and CDC sources</div><div class="cd">EAM (work orders, failures), production accounting, workforce, HSE, spares, contracts.</div></div>
+        <div class="card"><div class="ct">File sources</div><div class="cd">Lab assays, meter proving, prices, per-location weather, OSDU well/PVT, documents, geometry.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 2. Landing -->
+    <div class="stage">
+      <div class="cap" style="background:var(--land)">
+        <div class="n">Step 2</div><div class="t">Landing</div>
+        <div class="d">Raw inputs in Unity Catalog</div>
+      </div>
+      <div class="body" style="--ac:var(--land)">
+        <div class="card"><div class="ct">Streaming landing tables</div><div class="cd"><code>land_telemetry</code>, <code>land_events</code> (Delta, append).</div></div>
+        <div class="card"><div class="ct">Source snapshots</div><div class="cd"><code>src_*</code> CDC/batch tables for EAM, PA, HR, HSE, spares, contracts.</div></div>
+        <div class="card"><div class="ct">Backbone tables</div><div class="cd">tag registry, asset / functional-location / well master, PVT, id crossmap.</div></div>
+        <div class="card"><div class="ct">Landing volume</div><div class="cd"><code>/Volumes/.../landing</code>: CSV + JSON files for Auto Loader.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 3. Bronze -->
+    <div class="stage">
+      <div class="cap" style="background:var(--bronze)">
+        <div class="n">Step 3</div><div class="t">Bronze</div>
+        <div class="d">Raw fidelity &middot; ~27 tables</div>
+      </div>
+      <div class="body" style="--ac:var(--bronze)">
+        <div class="card"><div class="ct">Streaming by source system</div><div class="cd">process telemetry, vibration features, CEMS emissions, custody metering.</div></div>
+        <div class="card"><div class="ct">Safety and alarms</div><div class="cd">discrete ESD / fire-and-gas / exceedance events.</div></div>
+        <div class="card"><div class="ct">Historian + PI-AF stand-ins</div><div class="cd">historian snapshot and asset-framework context.</div></div>
+        <div class="card"><div class="ct">CDC snapshots + Auto Loader</div><div class="cd">EAM/PA/HSE snapshots; lab, prices, weather, OSDU, docs via Auto Loader.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 4. Silver -->
+    <div class="stage">
+      <div class="cap" style="background:var(--silver)">
+        <div class="n">Step 4</div><div class="t">Silver</div>
+        <div class="d">Conformed, typed, contextualized &middot; ~30 tables</div>
+      </div>
+      <div class="body" style="--ac:var(--silver)">
+        <div class="card"><div class="ct">Conformed telemetry</div><div class="cd">process + vibration + emissions + metering time series, joined to the tag registry.</div></div>
+        <div class="card"><div class="ct">Reference and master</div><div class="cd">asset, tag, functional location, well, PVT (SCD where needed).</div></div>
+        <div class="card"><div class="ct">Operational records</div><div class="cd">work orders, notifications, failures, allocation, deferment, nominations, permits, spares.</div></div>
+        <div class="card"><div class="ct">Context</div><div class="cd">lab assays, weather, prices, custody proving, documents, geometry.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 5. Gold -->
+    <div class="stage">
+      <div class="cap" style="background:var(--gold)">
+        <div class="n">Step 5</div><div class="t">Gold marts</div>
+        <div class="d">The serving layer &middot; 32 marts (Genie reads these only)</div>
+      </div>
+      <div class="body" style="--ac:var(--gold)">
+        <div class="card"><div class="ct">Production and constraint</div><div class="cd">field production, well scorecard, plant KPI, asset state, constraint ranking, flow assurance, custody.</div></div>
+        <div class="card"><div class="ct">Reliability and integrity</div><div class="cd">compression health, work orders, failures, maintenance reliability, integrity / RBI, spares risk.</div></div>
+        <div class="card"><div class="ct">Emissions and sustainability</div><div class="cd">emissions ledger, carbon compliance, methane LDAR, produced water, energy efficiency.</div></div>
+        <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, molecule-to-market margin, capital plan, deferment, lab, weather.</div></div>
+        <div class="card"><div class="ct">Predictive and advisory</div><div class="cd">remaining useful life, liquid-loading risk, production forecast, recommendations.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 6. Serving -->
+    <div class="stage">
+      <div class="cap" style="background:var(--serve)">
+        <div class="n">Step 6</div><div class="t">Serving and consumption</div>
+        <div class="d">How users and agents access it</div>
+      </div>
+      <div class="body" style="--ac:var(--serve)">
+        <div class="card"><div class="ct">Digital twin app</div><div class="cd">FastAPI + single-page UI. Reads the gold marts through a SQL warehouse (pooled, concurrent).</div></div>
+        <div class="card"><div class="ct">Genie space</div><div class="cd">natural-language analytics over the gold marts only.</div></div>
+        <div class="card"><div class="ct">AI/BI dashboard</div><div class="cd">published summary of production, reliability and emissions.</div></div>
+        <div class="card"><div class="ct">Lakebase write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions to a Postgres instance (audited).</div></div>
+      </div>
+    </div>
+
+  </div><!-- /flow -->
+
+  <div class="spine">
+    <div class="k">AREA-SYSTEM-CLASS-NNNN</div>
+    <div class="x"><b>One join key ties it all together.</b> Every tag id (for example <code>CPF002-CMP-AT-1018</code>)
+      decodes to its area, system and equipment class, and resolves through the backbone to its asset,
+      functional location, live value and its ids in every other system (PI historian, EAM, OSDU, P&amp;ID).
+      The app's <b>Asset &amp; Document Explorer</b> demonstrates this resolution live.</div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><h4>Compute</h4><p>Everything runs on serverless: the generation job, the Lakeflow medallion pipeline, the SQL warehouse behind the app / Genie / dashboard, and the Lakebase instance.</p></div>
+    <div class="note"><h4>Governance</h4><p>All objects live in one Unity Catalog catalog and schema. Tables and columns carry COMMENTs; the app service principal is granted read access on the schema.</p></div>
+    <div class="note"><h4>Parameterized</h4><p>Catalog, schema, warehouse and Lakebase instance are bundle variables, so one asset bundle deploys to any workspace with a single command.</p></div>
+    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the copilot shows a "not wired yet" note; without Lakebase the recommendation inbox is read-only. The core twin still serves.</p></div>
+  </div>
+
+  <footer>Gas Upstream Digital Twin &middot; bronze - silver - gold on Databricks &middot; see README.md for deployment</footer>
+</div>
+</body>
+</html>

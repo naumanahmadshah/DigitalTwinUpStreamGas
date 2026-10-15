@@ -1,0 +1,21 @@
+# Rendered at deploy time from app.yaml.tmpl — never commit (contains the resolved Lakebase host etc.)
+app/app.yaml
+
+# Databricks bundle local state
+.databricks/
+*.tfstate
+*.tfstate.backup
+
+# Python
+__pycache__/
+*.pyc
+
+# Local rendered preview of the README (regenerate anytime; GitHub renders README.md directly)
+README.html
+
+# Editor / OS scratch
+*.bak
+.DS_Store
+.idea/
+.vscode/
+*.log

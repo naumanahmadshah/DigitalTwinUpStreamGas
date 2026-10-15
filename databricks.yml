@@ -1,0 +1,50 @@
+# Databricks Asset Bundle — Gas Upstream Digital Twin.
+# A self-contained, end-to-end upstream gas digital twin: synthetic OT/IT data generation,
+# a bronze -> silver -> gold medallion (Lakeflow DLT), a FastAPI + single-page application,
+# a curated Genie space, an AI/BI dashboard, and Lakebase write-back.
+#
+# Everything is parameterised by a target catalog + schema. Deploy with the master scripts in
+# scripts/ (scripts/deploy.sh on macOS/Linux, scripts/deploy.ps1 on Windows), which create the
+# catalog, schema and landing volume, deploy this bundle, generate the data, and start the app.
+bundle:
+  name: gas-upstream-digital-twin
+
+# Resource definitions live in resources/, split by concern (pipeline / jobs / app).
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Target Unity Catalog catalog. Created by the deploy script if it does not exist.
+    default: gas_upstream_digital_twin
+  schema:
+    description: Target schema inside the catalog (all twin tables, marts and the landing volume live here).
+    default: digital_twin
+  warehouse_id:
+    description: SQL warehouse id for the app, Genie and the dashboard. Auto-detected or created by the deploy script.
+    default: ""
+  db_instance:
+    description: Lakebase (Postgres) database instance used for recommendation write-back.
+    default: gas-upstream-twin-db
+  app_name:
+    description: Databricks App name (must be unique in the workspace, lowercase with hyphens).
+    default: gas-upstream-twin
+
+# Keep the workspace files tidy: the deploy tooling and docs do not need to be synced.
+# (.git is excluded by the bundle automatically.)
+sync:
+  # app/app.yaml is rendered at deploy time and is listed in .gitignore. Bundles honor .gitignore,
+  # so it must be force-included here or the app would deploy without its command + env vars.
+  include:
+    - app/app.yaml
+  exclude:
+    - scripts
+    - docs
+    - "*.md"
+
+targets:
+  # A single default target. The deploy scripts pass the catalog/schema/warehouse/db_instance
+  # as --var overrides, so one target serves every workspace. No `mode` is set, so resources
+  # deploy with their literal names (no dev-prefixing) and no schedule pausing.
+  main:
+    default: true

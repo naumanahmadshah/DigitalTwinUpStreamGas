@@ -1,0 +1,153 @@
+# Upstream Gas Digital Twin v2 — seed configuration (the reference world, Data-gen Part 9 Layer 1).
+#
+# This file is the ONLY layer a new field edits: it parameterizes the whole twin. The generator
+# expands it into the semantic backbone (functional locations, assets, the tag registry under
+# AREA-SYSTEM-CLASS-NNNN, wells, PVT, gathering topology, 3D scenes). The medallion and the two
+# surfaces (App + Genie) bind to the tag_id contract this produces.
+#
+# Cardinality follows Design Part 9.8 (one hero field): ~100 producing wells across 12 pads,
+# one CPF with two trains (six compressors, TEG dehydration, amine/AGRU, NGL, utilities, flare),
+# and two custody/export metering stations. Tag counts are scaled to a demo-sane size while the
+# physics stays real (Part 9.10 "hydraulics fidelity: high").
+
+seed: 20260930            # deterministic: same seed => same field, same trips, same numbers
+
+field:
+  name: Barwon            # generic AU-style hero gas field (re-skins by swapping the seed)
+  operator: Generic Upstream Operator (synthetic)
+  basin: Surat            # Queensland CSG + conventional blend
+  # map anchor for the Australia map view (H3-indexed downstream); pads/facilities scatter around this
+  center_lat: -26.55
+  center_lon: 150.10
+  scatter_deg: 0.65       # +/- degrees the pads/facilities spread around the anchor
+
+# ---------------------------------------------------------------------------------------------
+# Tag scheme (Design 6.1): AREA-SYSTEM-CLASS-NNNN, e.g. BAR008-WB-VL-2555. The on-asset tag IS
+# the join key into slv_tag_registry and the 3D hotspot key.
+# ---------------------------------------------------------------------------------------------
+tag_scheme: "{area}-{system}-{class}-{nnnn:04d}"
+
+# ISA-5.1-style class codes. measured=true emits telemetry; measured=false are physical assets
+# (valves, vessels) that carry status/derived signals.
+class_codes:
+  PT: {name: pressure transmitter,      kind: measured, unit: kPa}
+  TT: {name: temperature transmitter,   kind: measured, unit: degC}
+  FT: {name: flow transmitter,          kind: measured, unit: e3m3/d}
+  FE: {name: flow element / meter,      kind: measured, unit: e3m3/d}
+  LT: {name: level transmitter,         kind: measured, unit: pct}
+  AT: {name: analyzer / gas chromatograph, kind: measured, unit: molpct}
+  VT: {name: vibration transmitter,     kind: measured, unit: mm/s}
+  GD: {name: gas detector (F&G),        kind: measured, unit: pctLEL}
+  ZT: {name: valve position,            kind: measured, unit: pct}
+  SP: {name: speed / rotational,        kind: measured, unit: rpm}
+  JT: {name: power / load,              kind: measured, unit: kW}
+  VL: {name: control valve,             kind: asset}
+  ESD: {name: shutdown valve (SIS/ESD), kind: asset}
+  PU: {name: pump,                      kind: asset}
+  CP: {name: compressor,                kind: asset}
+  HX: {name: heat exchanger,            kind: asset}
+  VE: {name: vessel / separator,        kind: asset}
+  CL: {name: column,                    kind: asset}
+  TK: {name: tank,                      kind: asset}
+  GT: {name: gas turbine / genset,      kind: asset}
+
+# ---------------------------------------------------------------------------------------------
+# Systems (the SYSTEM token) grouped by value-chain stop. Each maps to a Part 2 App tab.
+# ---------------------------------------------------------------------------------------------
+systems:
+  RES: {name: reservoir,                 stop: reservoir}
+  WB:  {name: wellhead / tree,           stop: wells}
+  AL:  {name: artificial lift,           stop: wells}
+  GL:  {name: gathering line,            stop: gathering}
+  SEP: {name: inlet separation,          stop: processing}
+  CMP: {name: compression,               stop: processing}
+  DEH: {name: TEG dehydration,           stop: processing}
+  AMN: {name: amine / AGRU,              stop: processing}
+  NGL: {name: NGL / stabilization,       stop: processing}
+  UTL: {name: utilities / power,         stop: processing}
+  FLR: {name: flare / vent,              stop: processing}
+  MET: {name: custody metering / export, stop: custody}
+
+# value-chain stops -> App tabs (Design 3.1). Order is the physical gas path.
+value_chain_stops:
+  - {code: reservoir,  tab: "Reservoir & Subsurface"}
+  - {code: wells,      tab: "Wells & Artificial Lift"}
+  - {code: gathering,  tab: "Gathering & Flow Assurance"}
+  - {code: processing, tab: "Processing Facility / CPF"}
+  - {code: custody,    tab: "Custody Transfer & Export"}
+
+# ---------------------------------------------------------------------------------------------
+# Field estate (Design Part 9.8). Areas carry the AREA token; the generator distributes wells,
+# assets, and tags across them and assigns geolocations for the map + 3D scenes.
+# ---------------------------------------------------------------------------------------------
+wellpads:
+  count: 50               # BAR001 .. BAR050 — large-operator footprint (large Australian CSG operator scale)
+  prefix: BAR
+  wells_total: 500        # ~500 producing wells distributed across the pads, spread over the 9 AU basins
+  # a realistic CSG/conventional blend
+  csg_fraction: 0.6       # 60% CSG (ESP-dewatered) wells, 40% conventional
+  gas_lift_fraction: 0.25 # of conventional wells, share on gas lift
+
+gathering:
+  area: GTH001            # base/prefix; the generator expands to GTH001..GTH0{hubs}
+  hubs: 12                # 12 gathering hubs / compression satellites across the basins (one map bubble each)
+  segments: 48            # gathering-line segments distributed across the hubs
+
+cpf:
+  # two Central Processing Facilities, five parallel trains in total (CPF001-002 = CPF-A, CPF003-005 = CPF-B)
+  trains:
+    - {area: CPF001, name: Train 1}
+    - {area: CPF002, name: Train 2}
+    - {area: CPF003, name: Train 3}
+    - {area: CPF004, name: Train 4}
+    - {area: CPF005, name: Train 5}
+  compressors_per_train: 3   # 15 units total
+  has_teg: true
+  has_amine: true
+  has_ngl: true
+  has_utilities: true
+  has_flare: true
+
+custody:
+  stations:
+    - {area: MET001, name: Sales gas metering — pipeline export}
+    - {area: MET002, name: Sales gas metering — interconnect}
+    - {area: MET003, name: Sales gas metering — LNG feed}
+
+# ---------------------------------------------------------------------------------------------
+# 3D scenes (Design 2.13 / 3.1): one navigable scene per value-chain stop. hotspot key == tag_id.
+# The generator writes slv_geometry_manifest rows mapping scene_id -> tag_id -> coords/LOD.
+# ---------------------------------------------------------------------------------------------
+scenes:
+  per_wellpad: true          # scene_{AREA}_wh for each pad
+  gathering: true            # scene_GTH001
+  per_cpf_train: true        # scene_{AREA} compression + process for each train
+  custody: true              # scene_MET
+
+# ---------------------------------------------------------------------------------------------
+# Generation run parameters (Data-gen Part 9.8). Tag counts scaled to demo size; physics real.
+# ---------------------------------------------------------------------------------------------
+generation:
+  backfill_days: 730         # 2 years: reservoir depletion, a seasonal weather cycle, RBI/maint clocks
+  raw_window_days: 14        # short raw uncompressed window for the historian-materialization path
+  gas_day_tz: "Australia/Brisbane"
+  # demo-sane volumes: report-by-exception keeps the row count realistic but cheap on serverless
+  deadband_pct: 1.5          # RT tags emit only when they move beyond this band
+  bad_quality_fraction: 0.02 # share of records flagged bad/uncertain/sensor_out/manual_override
+  missing_context_fraction: 0.05 # share of assets with missing/stale functional-location links
+
+# ---------------------------------------------------------------------------------------------
+# Scenario storylines (Data-gen 9.7). Each is a seeded, reproducible perturbation of solve().
+# One injected scenario propagates to every downstream signal, event, allocation line, and dollar.
+# These map straight to the Part 3 operator questions and the 3.2 Genie bank.
+# ---------------------------------------------------------------------------------------------
+scenarios:
+  - {id: reservoir_depletion,   enabled: true,  target: "BAR007", desc: "well group pressure trends down vs plan"}
+  - {id: liquid_loading_onset,  enabled: true,  target: "BAR003", desc: "a well crosses its critical rate"}
+  - {id: compressor_vibration,  enabled: true,  target: "CPF002-CMP", desc: "vibration rises on a Train 2 compressor, unit becomes the field constraint"}
+  - {id: dewpoint_drift,        enabled: true,  target: "CPF001", desc: "TEG/amine degrades, stream approaches spec limit"}
+  - {id: emissions_event,       enabled: true,  target: "CPF001-FLR", desc: "flare/vent episode + fugitive plume"}
+  - {id: deferment_event,       enabled: true,  target: "BAR005", desc: "event defers production with coded cause + dollars"}
+  - {id: integrity_due,         enabled: true,  target: "CPF002", desc: "an asset's RBI clock reaches threshold"}
+  - {id: unaccounted_gas,       enabled: true,  target: "MET002", desc: "metered vs allocated diverge (UAF)"}
+  - {id: baseline,              enabled: true,  target: null,     desc: "null scenario: steady state within noise (consistency check)"}

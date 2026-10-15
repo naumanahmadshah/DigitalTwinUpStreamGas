@@ -1,0 +1,21 @@
+# Lakeflow Declarative Pipeline (DLT) — the bronze -> silver -> gold medallion.
+# Reads the landing tables + landing volume written by the setup job, and publishes the curated
+# gold marts the app, Genie and the dashboard query. Serverless; no manual cluster config.
+# Paths are relative to this file (resources/), hence ../pipelines/...
+resources:
+  pipelines:
+    medallion:
+      name: "[${var.catalog}.${var.schema}] Gas Twin - Medallion"
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      configuration:
+        twin.catalog: ${var.catalog}
+        twin.schema: ${var.schema}
+      libraries:
+        - file:
+            path: ../pipelines/bronze/bronze.py
+        - file:
+            path: ../pipelines/silver/silver.py
+        - file:
+            path: ../pipelines/gold/gold.py
