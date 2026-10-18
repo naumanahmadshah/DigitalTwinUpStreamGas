@@ -1,4 +1,4 @@
-"""TwinV2 Bronze — landing only (Design Part 8.2). Raw fidelity, append-only, minimal transform.
+"""TwinV2 Bronze: landing only (Design Part 8.2). Raw fidelity, append-only, minimal transform.
 
 All five Part-5 load classes: RT/NRT streaming from the landing tables (split by source_system),
 event streams, batch snapshots of the CDC src_* tables, and Auto Loader for files on the Volume.
@@ -87,6 +87,9 @@ bz_mc = _snapshot("bronze_moc", "BRZ-09. OT-security / management-of-change log 
 bz_sp = _snapshot("bronze_spares", "BRZ-09. Spare-parts inventory snapshot (on-hand + lead time + BOM applicability).", "src_spares_inventory")
 bz_ct = _snapshot("bronze_contracts", "BRZ-10. Gas-sales contracts snapshot (delivery point + daily qty + take-or-pay).", "src_commercial_contracts")
 bz_dv = _snapshot("bronze_dev_schedule", "BRZ-10. Development / capex schedule snapshot (projects by area).", "src_dev_schedule")
+bz_sn = _snapshot("bronze_supply_network", "BRZ-10. Supply-network snapshot: directed edges reservoir to customer with flow-split shares.", "src_supply_network")
+bz_cu = _snapshot("bronze_customers", "BRZ-10. Customer book snapshot (fictional buyers, delivery point, contract terms).", "src_customers")
+bz_cd = _snapshot("bronze_customer_deliveries", "BRZ-10. Daily custody-transfer deliveries per customer snapshot (nominated vs delivered).", "src_customer_deliveries")
 
 
 # ===== BRZ-06/07/08/11/12: Auto Loader for files on the Volume ================================

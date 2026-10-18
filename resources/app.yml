@@ -1,4 +1,4 @@
-# Databricks App — the FastAPI backend + single-page UI for the twin.
+# Databricks App: the FastAPI backend + single-page UI for the twin.
 # The app reads the gold marts through the SQL warehouse and writes recommendation decisions to
 # Lakebase. app.yaml (rendered from app.yaml.tmpl by the deploy script) supplies the catalog,
 # schema, Lakebase host and Genie space id as environment variables.
@@ -7,7 +7,7 @@ resources:
   apps:
     app:
       name: ${var.app_name}
-      description: "Gas Upstream Digital Twin: Command Centre, field map, value-chain and cross-landscape tabs, 3D navigator, Field Copilot (Genie) and a human-in-the-loop recommendation inbox."
+      description: "Gas Upstream Digital Twin: Command Centre, field map, value-chain and cross-landscape tabs, 3D navigator, a link to the Genie space and a human-in-the-loop recommendation inbox."
       source_code_path: ../app
       resources:
         - name: "warehouse"

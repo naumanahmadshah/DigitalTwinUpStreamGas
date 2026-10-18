@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================================
-# Gas Upstream Digital Twin — data generation (macOS / Linux).
+# Gas Upstream Digital Twin: data generation (macOS / Linux).
 #
 # Fires the "setup" job in the deployed bundle: it builds the semantic backbone and backfills
 # ~2 years of telemetry/events plus the batch, reference and file sources. deploy.sh calls this
@@ -34,6 +34,6 @@ esac; done
 cd "$ROOT"
 VARS="catalog=${CATALOG},schema=${SCHEMA},warehouse_id=${WAREHOUSE_ID},db_instance=${DB_INSTANCE},app_name=${APP_NAME}"
 step "Running the data-generation job (setup)"
-info "catalog=$CATALOG schema=$SCHEMA — this takes ~10-20 minutes on serverless"
+info "catalog=$CATALOG schema=$SCHEMA, this takes ~10-20 minutes on serverless"
 databricks bundle run setup -t main -p "$PROFILE" --var "$VARS"
 ok "data generation finished"

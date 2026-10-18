@@ -1,4 +1,4 @@
-# Upstream Gas Digital Twin v2 — seed configuration (the reference world, Data-gen Part 9 Layer 1).
+# Upstream Gas Digital Twin v2: seed configuration (the reference world, Data-gen Part 9 Layer 1).
 #
 # This file is the ONLY layer a new field edits: it parameterizes the whole twin. The generator
 # expands it into the semantic backbone (functional locations, assets, the tag registry under
@@ -81,7 +81,7 @@ value_chain_stops:
 # assets, and tags across them and assigns geolocations for the map + 3D scenes.
 # ---------------------------------------------------------------------------------------------
 wellpads:
-  count: 50               # BAR001 .. BAR050 — large-operator footprint (large Australian CSG operator scale)
+  count: 50               # BAR001 .. BAR050, a large-operator footprint (large Australian CSG operator scale)
   prefix: BAR
   wells_total: 500        # ~500 producing wells distributed across the pads, spread over the 9 AU basins
   # a realistic CSG/conventional blend
@@ -110,9 +110,59 @@ cpf:
 
 custody:
   stations:
-    - {area: MET001, name: Sales gas metering — pipeline export}
-    - {area: MET002, name: Sales gas metering — interconnect}
-    - {area: MET003, name: Sales gas metering — LNG feed}
+    - {area: MET001, name: "Sales gas metering, pipeline export"}
+    - {area: MET002, name: "Sales gas metering, interconnect"}
+    - {area: MET003, name: "Sales gas metering, LNG feed"}
+    - {area: MET004, name: "Sales gas metering, WA domestic pipeline"}   # WA gas cannot reach the east-coast grid
+
+# ---------------------------------------------------------------------------------------------
+# Supply network (the physical gas path, for impact analysis). Pads feed the gathering hub(s) in their
+# basin; hubs feed the processing train in their basin, or the nearest train when their basin has none.
+# Each train's sales gas splits across custody meters by these shares (they sum to 1 per train).
+# ---------------------------------------------------------------------------------------------
+network:
+  processing_shrink: 0.03    # fuel gas + CO2/inert removal between the wellhead and the sales meter
+  train_custody:
+    CPF001: {MET001: 0.6, MET003: 0.4}   # Surat: domestic pipeline export + Gladstone LNG feed
+    CPF002: {MET002: 0.7, MET001: 0.3}   # Cooper: Moomba interconnect + backhaul north to Wallumbilla
+    CPF003: {MET003: 1.0}                # Bowen: LNG feed
+    CPF004: {MET004: 1.0}                # Carnarvon: WA domestic pipeline
+    CPF005: {MET004: 1.0}                # Perth Basin: WA domestic pipeline
+
+# ---------------------------------------------------------------------------------------------
+# Customers the gas is custody-transferred to. ALL NAMES ARE FICTIONAL. weight = share of the delivery
+# point's sales gas; the generator sizes each contract's MDQ from the metered volume. price_gj: null =
+# floats with the daily market price (spot). priority 1 = firm (curtailed last), 3 = spot (first).
+# ---------------------------------------------------------------------------------------------
+customers:
+  - {name: Brisbane Basin Energy Retail,    segment: Retail,          location: "Brisbane, QLD",      delivery_point: MET001, contract: Firm GSA,      weight: 0.22, price_gj: 11.20, priority: 1}
+  - {name: Condamine Plains Power,          segment: Power generation, location: "Chinchilla, QLD",   delivery_point: MET001, contract: Firm GSA,      weight: 0.18, price_gj: 10.60, priority: 1}
+  - {name: Moreton Bay Fertilisers,         segment: Industrial,      location: "Brisbane, QLD",      delivery_point: MET001, contract: Firm GSA,      weight: 0.12, price_gj: 10.10, priority: 1}
+  - {name: Sunshine Coast Gas Distribution, segment: Distribution,    location: "Maroochydore, QLD",  delivery_point: MET001, contract: Firm GSA,      weight: 0.10, price_gj: 11.50, priority: 1}
+  - {name: Hunter Coast Aluminium,          segment: Industrial,      location: "Newcastle, NSW",     delivery_point: MET001, contract: Firm GSA,      weight: 0.14, price_gj: 10.40, priority: 1}
+  - {name: Sydney Harbour Energy Retail,    segment: Retail,          location: "Sydney, NSW",        delivery_point: MET001, contract: Interruptible, weight: 0.14, price_gj: 11.80, priority: 2}
+  - {name: Wallumbilla hub short-term trades, segment: Spot market,   location: "Wallumbilla, QLD",   delivery_point: MET001, contract: Spot,          weight: 0.10, price_gj: null,  priority: 3}
+  - {name: Adelaide Plains Power,           segment: Power generation, location: "Adelaide, SA",      delivery_point: MET002, contract: Firm GSA,      weight: 0.20, price_gj: 11.00, priority: 1}
+  - {name: Spencer Gulf Smelting,           segment: Industrial,      location: "Whyalla, SA",        delivery_point: MET002, contract: Firm GSA,      weight: 0.12, price_gj: 10.30, priority: 1}
+  - {name: Southern Cross Energy,           segment: Retail,          location: "Adelaide, SA",       delivery_point: MET002, contract: Firm GSA,      weight: 0.20, price_gj: 11.40, priority: 1}
+  - {name: Tasman Industrial Gas,           segment: Industrial,      location: "Geelong, VIC",       delivery_point: MET002, contract: Firm GSA,      weight: 0.15, price_gj: 10.80, priority: 1}
+  - {name: Murray Basin Glassworks,         segment: Manufacturing,   location: "Mildura, VIC",       delivery_point: MET002, contract: Interruptible, weight: 0.08, price_gj: 11.10, priority: 2}
+  - {name: Melbourne Metro Gas Retail,      segment: Retail,          location: "Melbourne, VIC",     delivery_point: MET002, contract: Firm GSA,      weight: 0.17, price_gj: 11.60, priority: 1}
+  - {name: Victorian wholesale market sales, segment: Spot market,    location: "Melbourne, VIC",     delivery_point: MET002, contract: Spot,          weight: 0.08, price_gj: null,  priority: 3}
+  - {name: Meridian LNG Trading,            segment: LNG portfolio,   location: "Gladstone, QLD",     delivery_point: MET003, contract: LNG SPA,       weight: 0.25, price_gj: 13.40, priority: 1}
+  - {name: Seto Bay Utilities,              segment: LNG export,      location: "Osaka, Japan",       delivery_point: MET003, contract: LNG SPA,       weight: 0.22, price_gj: 14.10, priority: 1}
+  - {name: Seoul Bay City Gas,              segment: LNG export,      location: "Incheon, South Korea", delivery_point: MET003, contract: LNG SPA,     weight: 0.18, price_gj: 13.90, priority: 1}
+  - {name: Pearl Delta Energy,              segment: LNG export,      location: "Guangzhou, China",   delivery_point: MET003, contract: LNG SPA,       weight: 0.18, price_gj: 13.60, priority: 1}
+  - {name: Straits Energy Trading,          segment: LNG export,      location: "Singapore",          delivery_point: MET003, contract: LNG SPA,       weight: 0.06, price_gj: 14.30, priority: 1}
+  - {name: Curtis Island Domestic Offtake,  segment: Industrial,      location: "Gladstone, QLD",     delivery_point: MET003, contract: Firm GSA,      weight: 0.07, price_gj: 10.90, priority: 1}
+  - {name: LNG spot cargoes,                segment: Spot market,     location: "Gladstone, QLD",     delivery_point: MET003, contract: Spot,          weight: 0.04, price_gj: null,  priority: 3}
+  - {name: Coral Coast Gas Retail,          segment: Retail,          location: "Perth, WA",          delivery_point: MET004, contract: Firm GSA,      weight: 0.20, price_gj: 9.40,  priority: 1}
+  - {name: Red Range Iron Ore,              segment: Mining,          location: "Karratha, WA",       delivery_point: MET004, contract: Firm GSA,      weight: 0.20, price_gj: 8.90,  priority: 1}
+  - {name: Peel Coast Alumina,              segment: Industrial,      location: "Mandurah, WA",       delivery_point: MET004, contract: Firm GSA,      weight: 0.14, price_gj: 8.70,  priority: 1}
+  - {name: Outback Power Co,                segment: Power generation, location: "Port Hedland, WA",  delivery_point: MET004, contract: Firm GSA,      weight: 0.17, price_gj: 9.10,  priority: 1}
+  - {name: Eastern Goldfields Nickel,       segment: Mining,          location: "Kalgoorlie, WA",     delivery_point: MET004, contract: Interruptible, weight: 0.12, price_gj: 9.60,  priority: 2}
+  - {name: Perth Metro Gas Distribution,    segment: Distribution,    location: "Perth, WA",          delivery_point: MET004, contract: Firm GSA,      weight: 0.13, price_gj: 9.80,  priority: 1}
+  - {name: WA short-term trades,            segment: Spot market,     location: "Perth, WA",          delivery_point: MET004, contract: Spot,          weight: 0.04, price_gj: null,  priority: 3}
 
 # ---------------------------------------------------------------------------------------------
 # 3D scenes (Design 2.13 / 3.1): one navigable scene per value-chain stop. hotspot key == tag_id.

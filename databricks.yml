@@ -1,4 +1,4 @@
-# Databricks Asset Bundle — Gas Upstream Digital Twin.
+# Databricks Asset Bundle: Gas Upstream Digital Twin.
 # A self-contained, end-to-end upstream gas digital twin: synthetic OT/IT data generation,
 # a bronze -> silver -> gold medallion (Lakeflow DLT), a FastAPI + single-page application,
 # a curated Genie space, an AI/BI dashboard, and Lakebase write-back.

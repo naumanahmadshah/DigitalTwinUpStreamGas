@@ -27,7 +27,8 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
 . (Join-Path $Here 'lib\common.ps1')
 Set-Location $Root
-$GenieTitle = "Gas Upstream Digital Twin"
+$GenieTitle = "Asset Intelligence Genie"
+$GenieOld   = "Gas Upstream Digital Twin"   # earlier name
 $DashName   = "Gas Upstream Digital Twin"
 $WhName     = "Gas Twin Warehouse"
 if ($WorkspaceUrl) { $m = [regex]::Match($WorkspaceUrl, '^(https?://[^/?]+)'); if ($m.Success) { $WorkspaceUrl = $m.Groups[1].Value } }
@@ -86,7 +87,7 @@ Step "Removing the Genie space"
 $spaces = Db-Json api get /api/2.0/genie/spaces -p $Profile
 $gid = ""
 if ($spaces -and $spaces.spaces) {
-  $m = $spaces.spaces | Where-Object { $_.title -eq $GenieTitle } | Select-Object -First 1
+  $m = $spaces.spaces | Where-Object { $_.title -eq $GenieTitle -or $_.title -eq $GenieOld } | Select-Object -First 1
   if ($m) { $gid = if ($m.space_id) { $m.space_id } else { $m.id } }
 }
 if ($gid) { & databricks api delete "/api/2.0/genie/spaces/$gid" -p $Profile *> $null; Ok "Genie space removed ($gid)" } else { Ok "no Genie space to remove" }

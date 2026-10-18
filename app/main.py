@@ -1,8 +1,8 @@
-"""Upstream Gas Digital Twin v2 — App backend (Design Part 3).
+"""Upstream Gas Digital Twin v2: App backend (Design Part 3).
 
 Serves the single-pane twin over the curated GOLD marts (via the SQL warehouse) and the Lakebase
 write-back tables. Organised around the physical value chain: Command Centre + Map + one tab per
-value-chain stop + Cross-Cutting + Others, with a Field Copilot (Genie) and a human-in-the-loop
+value-chain stop + Cross-Cutting + Others, with a link out to the Genie space and a human-in-the-loop
 Recommendation Inbox on every screen. MV-only: routes issue plain SELECTs; all logic is in the marts.
 """
 from __future__ import annotations
@@ -24,9 +24,19 @@ SCHEMA = os.environ["TWIN_SCHEMA"]
 WAREHOUSE_ID = os.environ["DATABRICKS_WAREHOUSE_ID"]
 DB_INSTANCE = os.environ.get("TWIN_DB_INSTANCE")
 PGHOST = os.environ.get("TWIN_PGHOST")
-GENIE_SPACE = os.environ.get("TWIN_GENIE_SPACE")  # optional; set post-deploy for the Field Copilot
+GENIE_SPACE = os.environ.get("TWIN_GENIE_SPACE")  # optional; set post-deploy for the header Genie link
 
 app = FastAPI(title="Upstream Gas Digital Twin v2")
+
+
+# Make browsers revalidate the UI files on every load (cheap 304 via ETag when unchanged), so a redeploy
+# shows up on a normal refresh instead of serving a stale cached app.js / style.css.
+@app.middleware("http")
+async def _no_stale_ui(request: Request, call_next):
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 # Connection POOL + concurrent query execution. The warehouse per-query round-trip is ~0.3-0.5s, so a
 # screen that fires ~9 queries one-by-one on a single shared connection took 3-5s. A small pool lets a
@@ -176,7 +186,7 @@ def _pg_conn():
 # ============================ Navigation / modules ===========================================
 NAV = [
     {"key": "command_centre", "label": "Command Centre", "group": "Home", "level": "Live"},
-    {"key": "map", "label": "Field Map", "group": "Home", "level": "Live"},
+    {"key": "facility_view", "label": "Assets map", "group": "Home", "level": "Live"},
     {"key": "reservoir_wells", "label": "Reservoirs & Wells", "group": "Value chain", "level": "Predictive"},
     {"key": "gathering", "label": "Gathering & Flow Assurance", "group": "Value chain", "level": "Predictive"},
     {"key": "processing", "label": "Processing Facility / CPF", "group": "Value chain", "level": "Predictive"},
@@ -188,19 +198,18 @@ NAV = [
     {"key": "deferment", "label": "Deferment & Losses", "group": "Cross-cutting", "level": "Informative"},
     {"key": "economics", "label": "Cost & Economics", "group": "Cross-cutting", "level": "Informative"},
     {"key": "maintenance", "label": "Planning & Maintenance", "group": "Cross-cutting", "level": "Predictive"},
-    {"key": "recommendations", "label": "Recommendation Inbox", "group": "Cross-cutting", "level": "Human-in-the-loop"},
-    {"key": "lab", "label": "Lab & Assay", "group": "Asset 360", "level": "Informative"},
-    {"key": "commercial", "label": "Commercial & Prices", "group": "Asset 360", "level": "Informative"},
-    {"key": "weather", "label": "Weather & Environment", "group": "Asset 360", "level": "Informative"},
-    {"key": "produced_water", "label": "Produced Water Management", "group": "Sustainability", "level": "Informative"},
-    {"key": "energy", "label": "Fuel-Gas & Energy Efficiency", "group": "Sustainability", "level": "Informative"},
-    {"key": "carbon_compliance", "label": "Carbon / Safeguard Compliance", "group": "Sustainability", "level": "Informative"},
-    {"key": "methane_ldar", "label": "Methane LDAR", "group": "Sustainability", "level": "Predictive"},
-    {"key": "margin", "label": "Molecule-to-Market Margin", "group": "Business & Planning", "level": "Informative"},
-    {"key": "spares_risk", "label": "Spares & Procurement Risk", "group": "Business & Planning", "level": "Predictive"},
-    {"key": "capital_plan", "label": "Capital & Decline-Aware Investment", "group": "Business & Planning", "level": "Informative"},
+    {"key": "lab", "label": "Lab & Assay", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "commercial", "label": "Commercial & Prices", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "weather", "label": "Weather & Environment", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "produced_water", "label": "Produced Water Management", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "energy", "label": "Fuel-Gas & Energy Efficiency", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "carbon_compliance", "label": "Carbon / Safeguard Compliance", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "methane_ldar", "label": "Methane LDAR", "group": "Cross-cutting", "level": "Predictive"},
+    {"key": "margin", "label": "Molecule-to-Market Margin", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "spares_risk", "label": "Spares & Procurement Risk", "group": "Cross-cutting", "level": "Predictive"},
+    {"key": "capital_plan", "label": "Capital & Decline-Aware Investment", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "recommendations", "label": "Recommendation Inbox", "group": "Inbox", "level": "Human-in-the-loop"},  # own menu item, after Analytics
     {"key": "asset_model", "label": "Asset & Document Explorer", "group": "Others", "level": "Governed"},
-    {"key": "copilot", "label": "Ask me anything", "group": "Others", "level": "Agentic"},  # item 56: always last
 ]
 
 
@@ -208,7 +217,7 @@ NAV = [
 # never show raw snake_case or coded units. (key -> (label, description))
 COL_META = {
     "well_id": ("Well ID", "Unique well identifier."),
-    "asset_id": ("Asset ID", "Contextualised asset tag (AREA-SYSTEM-CLASS-NNNN) — the universal join key."),
+    "asset_id": ("Asset ID", "Contextualised asset tag (AREA-SYSTEM-CLASS-NNNN), the universal join key."),
     "area_code": ("Area", "Field area / basin the asset sits in."),
     "pad_area": ("Pad area", "Well-pad grouping."),
     "completion_type": ("Completion", "Well completion type (CSG or conventional)."),
@@ -321,7 +330,7 @@ COL_META = {
     "ch4_kg_d": ("CH₄ (kg/d)", "Methane emitted (measured + factor-based fugitive)."),
     "co2e_t_yr": ("CO₂-e (t/yr)", "Methane as CO₂-equivalent (GWP 28), annualised."),
     "detections": ("Detections", "Fire & gas / exceedance detector activations attributed to the asset."),
-    "product_value_dollars_yr": ("Lost gas value ($/yr)", "Annual market value of the gas currently escaping as this leak — gas the operator keeps and sells (instead of losing it to atmosphere) once the leak is repaired."),
+    "product_value_dollars_yr": ("Lost gas value ($/yr)", "Annual market value of the gas currently escaping as this leak: gas the operator keeps and sells (instead of losing it to atmosphere) once the leak is repaired."),
     "survey_status": ("Survey status", "LDAR triage: investigate / monitor / ok."),
     "netback_dollars": ("Netback ($)", "Revenue minus lifting and carbon cost."),
     "netback_per_gj": ("Netback ($/GJ)", "Unit netback margin."),
@@ -468,7 +477,7 @@ def _specs():
             "kpis": [("Avg carbon intensity (kg/10^3 m^3)", f"SELECT ROUND(AVG(ci),2) v FROM (SELECT gas_day, SUM(co2_kg)/NULLIF(MAX(field_e3m3),0) ci FROM {m('gld_emissions_ledger')} GROUP BY gas_day)"),
                      ("Total CH4 (kg)", f"SELECT ROUND(SUM(ch4_kg),0) v FROM {m('gld_emissions_ledger')}"),
                      ("Total CO2 (t)", f"SELECT ROUND(SUM(co2_kg)/1000,0) v FROM {m('gld_emissions_ledger')}")],
-            # field-level daily intensity (total CO2 / field production) — stable, no divide-by-source spikes
+            # field-level daily intensity (total CO2 / field production), stable, no divide-by-source spikes
             "charts": [("Carbon intensity trend (kg/10^3 m^3)", "line", "gas_day", "ci",
                         f"SELECT gas_day, ROUND(SUM(co2_kg)/NULLIF(MAX(field_e3m3),0),2) ci FROM {m('gld_emissions_ledger')} GROUP BY gas_day ORDER BY gas_day"),
                        ("CH4 by source (kg)", "bar", "source", "ch4",
@@ -535,8 +544,8 @@ def _specs():
                       ["wo_id", "asset_id", "wo_type", "assigned_to", "target_completion", "status", "priority", "created_date", "cost"], "Work orders (EAM)"),
         },
         "lab": {
-            "title": "Lab & Assay", "group": "Asset 360", "level": "Informative",
-            "blurb": "Laboratory gas-composition assays (LIMS) across the value chain — wellhead gas sampled per well (quarterly), plus inlet-separator, treated-gas and sales-gas (custody) composition — so the full chain from well to custody is covered, not only wells. C₁/CO₂/N₂, H₂S, water and oil-in-water.",
+            "title": "Lab & Assay", "group": "Cross-cutting", "level": "Informative",
+            "blurb": "Laboratory gas-composition assays (LIMS) across the value chain: wellhead gas sampled per well (quarterly), plus inlet-separator, treated-gas and sales-gas (custody) composition, so the full chain from well to custody is covered, not only wells. C₁/CO₂/N₂, H₂S, water and oil-in-water.",
             "kpis": [("Samples", f"SELECT COUNT(*) v FROM {m('gld_lab_assay')}"),
                      ("Value-chain points sampled", f"SELECT COUNT(DISTINCT sample_point) v FROM {m('gld_lab_assay')}"),
                      ("Avg C1 (mol%)", f"SELECT ROUND(AVG(c1_molpct),1) v FROM {m('gld_lab_assay')}"),
@@ -547,8 +556,8 @@ def _specs():
                       ["asset_id", "sample_id", "sample_point", "well_id", "sample_date", "c1_molpct", "co2_molpct", "n2_molpct", "h2s_ppm", "water_ppm", "oil_in_water_ppm"], "Recent lab assays"),
         },
         "commercial": {
-            "title": "Commercial & Prices", "group": "Asset 360", "level": "Informative",
-            "blurb": "Commercial context: the sales-gas price the operator sells at and the market carbon price; contractual nominations vs delivery; and the money — cost of generation, sale revenue and profit.",
+            "title": "Commercial & Prices", "group": "Cross-cutting", "level": "Informative",
+            "blurb": "Commercial context: the sales-gas price the operator sells at and the market carbon price; contractual nominations vs delivery; and the money: cost of generation, sale revenue and profit.",
             "kpis": [("Sale revenue (last month $)", f"SELECT ROUND(SUM(revenue_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
                      ("Cost of generation (last month $)", f"SELECT ROUND(SUM(lifting_cost_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
                      ("Profit (last month $)", f"SELECT ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
@@ -565,7 +574,7 @@ def _specs():
                       ["gas_day", "gas_price_gj", "carbon_price_t", "nominated_e3m3", "actual_e3m3", "nomination_delivery_pct", "revenue_dollars", "cost_of_generation_dollars", "profit_dollars"], "Commercial ledger (daily)"),
         },
         "weather": {
-            "title": "Weather & Environment", "group": "Asset 360", "level": "Informative",
+            "title": "Weather & Environment", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Weather, environment and geospatial context: ambient temperature, wind, lightning and flood risk. Drives compression energy, dewpoint margin, flaring and HSE exposure.",
             "kpis": [("Latest ambient (C)", f"SELECT ROUND(ambient_c,1) v FROM {m('gld_weather')} ORDER BY obs_date DESC LIMIT 1"),
                      ("Max wind (km/h)", f"SELECT ROUND(MAX(wind_kmh),0) v FROM {m('gld_weather')} WHERE obs_date >= DATE_SUB((SELECT MAX(obs_date) FROM {m('gld_weather')}),61)"),
@@ -578,7 +587,7 @@ def _specs():
                       ["obs_date", "ambient_c", "wind_kmh", "lightning_risk", "flood_risk", "lat", "lon"], "Weather observations (daily)"),
         },
         "produced_water": {
-            "title": "Produced Water Management", "group": "Sustainability", "level": "Informative",
+            "title": "Produced Water Management", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Produced-water volumes derived from each well's gas rate and PVT water-gas ratio, with reinjection split and disposal cost. CSG water is a leading cost and compliance driver.",
             "kpis": [("Produced water (m³/d)", f"SELECT ROUND(SUM(water_m3),0) v FROM {m('gld_produced_water')} WHERE gas_day=(SELECT MAX(gas_day) FROM {m('gld_produced_water')})"),
                      ("Reinjected (%)", f"SELECT ROUND(100*SUM(reinjected_m3)/NULLIF(SUM(water_m3),0),1) v FROM {m('gld_produced_water')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_produced_water')}),61)"),
@@ -589,7 +598,7 @@ def _specs():
                       ["well_id", "pad_area", "completion_type", "water_m3", "reinjected_m3", "disposal_cost_dollars"], "Produced water by well"),
         },
         "energy": {
-            "title": "Fuel-Gas & Energy Efficiency", "group": "Sustainability", "level": "Informative",
+            "title": "Fuel-Gas & Energy Efficiency", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Own-use fuel gas and flaring vs production. Cutting fuel-gas burn and flaring frees salable gas and lowers Scope 1.",
             "kpis": [("Own-use (%)", f"SELECT ROUND(AVG(own_use_pct),2) v FROM {m('gld_energy_efficiency')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_energy_efficiency')}),61)"),
                      ("Flaring (%)", f"SELECT ROUND(AVG(flaring_pct),3) v FROM {m('gld_energy_efficiency')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_energy_efficiency')}),61)"),
@@ -602,7 +611,7 @@ def _specs():
                       ["gas_day", "fuel_gas_e3m3", "flare_e3m3", "own_use_pct", "flaring_pct"], "Energy & fuel-gas ledger (daily)"),
         },
         "carbon_compliance": {
-            "title": "Carbon / Safeguard Compliance", "group": "Sustainability", "level": "Informative",
+            "title": "Carbon / Safeguard Compliance", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Scope-1 CO₂ by facility and year against a best-practice baseline, with the ACCU cost to cover any shortfall under the Safeguard Mechanism.",
             "kpis": [("Scope-1 this year (t)", f"SELECT ROUND(SUM(scope1_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
                      ("Position vs baseline (t)", f"SELECT ROUND(SUM(position_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
@@ -613,7 +622,7 @@ def _specs():
                       ["facility", "reporting_year", "scope1_t", "baseline_t", "position_t", "accu_cost_dollars"], "Safeguard position by facility & year"),
         },
         "methane_ldar": {
-            "title": "Methane LDAR", "group": "Sustainability", "level": "Predictive",
+            "title": "Methane LDAR", "group": "Cross-cutting", "level": "Predictive",
             "blurb": "Leak detection and repair: measured and factor-based fugitive methane by component, its CO₂-e, detector activations, and the annual value of the escaping gas the operator keeps and sells once the leak is repaired.",
             "kpis": [("CH₄ (kg/d)", f"SELECT ROUND(SUM(ch4_kg_d),0) v FROM {m('gld_methane_ldar')}"),
                      ("CO₂-e (t/yr)", f"SELECT ROUND(SUM(co2e_t_yr),0) v FROM {m('gld_methane_ldar')}"),
@@ -624,7 +633,7 @@ def _specs():
                       ["asset_id", "area_code", "equipment_type", "ch4_kg_d", "co2e_t_yr", "detections", "product_value_dollars_yr", "survey_status"], "Methane by component (LDAR)"),
         },
         "margin": {
-            "title": "Molecule-to-Market Margin", "group": "Business & Planning", "level": "Informative",
+            "title": "Molecule-to-Market Margin", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Netback margin by gas day (revenue less lifting and carbon cost) against the contracted take-or-pay commitment, so an OT-driven production dip is priced straight to the trading book.",
             "kpis": [("Netback 62d ($)", f"SELECT ROUND(SUM(netback_dollars),0) v FROM {m('gld_margin')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_margin')}),61)"),
                      ("Netback ($/GJ)", f"SELECT ROUND(AVG(netback_per_gj),2) v FROM {m('gld_margin')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_margin')}),61)"),
@@ -637,7 +646,7 @@ def _specs():
                       ["gas_day", "revenue", "netback_dollars", "netback_per_gj", "deferred", "committed_e3m3", "take_or_pay_shortfall_e3m3"], "Margin & commitment (daily)"),
         },
         "spares_risk": {
-            "title": "Spares & Procurement Risk", "group": "Business & Planning", "level": "Predictive",
+            "title": "Spares & Procurement Risk", "group": "Cross-cutting", "level": "Predictive",
             "blurb": "Predictive remaining life against the procurement lead time of the applicable spare, flagging every asset whose part will arrive after it fails.",
             "kpis": [("Assets at risk", f"SELECT COUNT(*) v FROM {m('gld_spares_risk')} WHERE exposure='at_risk'"),
                      ("On watch", f"SELECT COUNT(*) v FROM {m('gld_spares_risk')} WHERE exposure='watch'"),
@@ -645,10 +654,10 @@ def _specs():
             "charts": [("Remaining life by asset (days)", "bar", "asset_id", "rul",
                         f"SELECT asset_id, ROUND(rul_days,0) rul FROM {m('gld_spares_risk')} ORDER BY asset_id", {"color": "lowbad"})],
             "table": (f"SELECT asset_id, area_code, equipment_type, part_name, procurement_type, rul_days, lead_time_days, on_hand, unit_cost, exposure FROM {m('gld_spares_risk')} WHERE exposure<>'ok' ORDER BY asset_id LIMIT 500",
-                      ["asset_id", "area_code", "equipment_type", "part_name", "procurement_type", "rul_days", "lead_time_days", "on_hand", "unit_cost", "exposure"], "Spares exposure — what to procure (lead time beats RUL)"),
+                      ["asset_id", "area_code", "equipment_type", "part_name", "procurement_type", "rul_days", "lead_time_days", "on_hand", "unit_cost", "exposure"], "Spares exposure, what to procure (lead time beats RUL)"),
         },
         "capital_plan": {
-            "title": "Capital & Decline-Aware Investment", "group": "Business & Planning", "level": "Informative",
+            "title": "Capital & Decline-Aware Investment", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Development and workover projects by area with capex, expected uplift, annual value and payback, timed against the field's production decline.",
             "kpis": [("Projects", f"SELECT COUNT(*) v FROM {m('gld_capital_plan')}"),
                      ("Capex ($)", f"SELECT ROUND(SUM(capex_dollars),0) v FROM {m('gld_capital_plan')}"),
@@ -677,16 +686,24 @@ def modules():
 
 @app.get("/api/genie-link")
 def genie_link():
-    """The workspace Genie room URL for the merged space, so the 'Ask me anything' page can deep-link out."""
+    """Deep link to the Genie space in Databricks One (the business-user interface), not the practitioner UI."""
     if not GENIE_SPACE:
         return JSONResponse({"url": None})
-    host = ""
-    try:
-        from databricks.sdk import WorkspaceClient
-        host = (WorkspaceClient().config.host or "").rstrip("/")
-    except Exception:
-        host = ""
-    return JSONResponse({"url": f"{host}/genie/rooms/{GENIE_SPACE}" if host else None, "space_id": GENIE_SPACE})
+    def load():
+        host, wsid = "", os.environ.get("DATABRICKS_WORKSPACE_ID", "")
+        try:
+            from databricks.sdk import WorkspaceClient
+            w = WorkspaceClient()
+            host = (w.config.host or "").rstrip("/")
+            if not wsid:
+                wsid = str(w.get_workspace_id())
+        except Exception:
+            pass
+        if host and not host.startswith("http"):
+            host = "https://" + host
+        q_ = f"?o={wsid}" if wsid else ""
+        return {"url": f"{host}/one/agents/{GENIE_SPACE}{q_}" if host else None, "space_id": GENIE_SPACE}
+    return JSONResponse(cached("genie_link", 3600, load))
 
 
 @app.get("/api/tag-lookup")
@@ -711,7 +728,7 @@ def tag_lookup(term: str = ""):
         f"LEFT JOIN {T('slv_id_crossmap')} x ON x.entity = t.tag_id "
         "WHERE lower(t.tag_id) LIKE %(p)s OR lower(t.asset_id) LIKE %(p)s "
         "OR lower(t.signal) LIKE %(p)s OR lower(t.description) LIKE %(p)s "
-        "ORDER BY t.tag_id"  # item 52: no 30-tag cap — show every match
+        "ORDER BY t.tag_id"  # item 52: no 30-tag cap: show every match
     )
     try:
         rows = q(sql, {"p": f"%{ql}%"})
@@ -724,7 +741,7 @@ def tag_lookup(term: str = ""):
 @app.get("/api/tree")
 def tree_areas():
     """Top of the physical-location tree: every area (well pad / CPF train / gathering hub /
-    custody station) with its proper name and asset / tag counts. Lazy — children load on expand."""
+    custody station) with its proper name and asset / tag counts. Lazy, children load on expand."""
     def load():
         counts, names = qmany([
             f"SELECT a.area_code, COUNT(DISTINCT a.asset_id) n_assets, COUNT(t.tag_id) n_tags "
@@ -762,7 +779,7 @@ def tree_assets(area: str):
 
 @app.get("/api/tree-asset/{asset_id}")
 def tree_tags(asset_id: str):
-    """Tags on one asset — the leaf of the physical-location tree. Each resolves via /api/tag-lookup."""
+    """Tags on one asset: the leaf of the physical-location tree. Each resolves via /api/tag-lookup."""
     sql = (
         "SELECT t.tag_id, t.signal, t.unit, ROUND(l.latest_value,2) latest_value, l.latest_quality "
         f"FROM {T('slv_tag_registry')} t "
@@ -976,7 +993,7 @@ def asset_series(asset_id: str):
                                       "points": [{"gas_day": r["gas_day"], "value": r["health_score"]} for r in vib if r["health_score"] is not None]}
         # vibration first (the hero signal), then the rest alphabetically; cap to keep the drawer tidy
         order = sorted(series.keys(), key=lambda k: (k != "vibration_overall", k))
-        # downsample each series to ~160 points — a 240px sparkline needs no more, and it cuts the
+        # downsample each series to ~160 points: a 240px sparkline needs no more, and it cuts the
         # drawer payload ~4x (730 daily points -> 160), so row-clicks open faster.
         def _ds(pts, n=160):
             if len(pts) <= n:
@@ -999,10 +1016,17 @@ def asset_series(asset_id: str):
 def weather_map():
     """Per-location weather (item 39): one point per area with its temperature range, wind and risks."""
     def load():
-        return q(f"""SELECT area_code, ROUND(AVG(lat),5) lat, ROUND(AVG(lon),5) lon,
-                            ROUND(MIN(ambient_c),1) tmin, ROUND(MAX(ambient_c),1) tmax, ROUND(AVG(ambient_c),1) tavg,
-                            ROUND(MAX(wind_kmh),0) wind_max, ROUND(MAX(lightning_risk),2) ltn_max, ROUND(MAX(flood_risk),2) fld_max
-                     FROM {T('gld_weather')} WHERE lat IS NOT NULL GROUP BY area_code ORDER BY area_code""")
+        rows, names = qmany([
+            f"""SELECT area_code, ROUND(AVG(lat),5) lat, ROUND(AVG(lon),5) lon,
+                       ROUND(MIN(ambient_c),1) tmin, ROUND(MAX(ambient_c),1) tmax, ROUND(AVG(ambient_c),1) tavg,
+                       ROUND(MAX(wind_kmh),0) wind_max, ROUND(MAX(lightning_risk),2) ltn_max, ROUND(MAX(flood_risk),2) fld_max
+                FROM {T('gld_weather')} WHERE lat IS NOT NULL GROUP BY area_code ORDER BY area_code""",
+            f"SELECT area_code, name FROM {T('slv_functional_location')} WHERE level = 'Area' AND is_current",
+        ])
+        nm = {r["area_code"]: r["name"] for r in names}
+        for r in rows:
+            r["name"] = nm.get(r["area_code"]) or r["area_code"]   # site name, e.g. "Well pad BAR045 (Beetaloo Basin)"
+        return rows
     return JSONResponse(cached("weather_map", 300, load))
 
 
@@ -1016,11 +1040,16 @@ def weather_site(area: str):
 @app.get("/api/map")
 def field_map():
     def load():
-        facs = q(f"""SELECT area_code, ROUND(AVG(gps_lat),5) lat, ROUND(AVG(gps_lon),5) lon,
-                            SUM(is_red) red, SUM(is_amber) amber, COUNT(*) assets,
-                            ROUND(SUM(production_at_risk_e3m3d),0) risk
-                     FROM {T('gld_asset_state')} WHERE gps_lat IS NOT NULL GROUP BY area_code""")
+        facs, names = qmany([
+            f"""SELECT area_code, ROUND(AVG(gps_lat),5) lat, ROUND(AVG(gps_lon),5) lon,
+                       SUM(is_red) red, SUM(is_amber) amber, COUNT(*) assets,
+                       ROUND(SUM(production_at_risk_e3m3d),0) risk
+                FROM {T('gld_asset_state')} WHERE gps_lat IS NOT NULL GROUP BY area_code""",
+            f"SELECT area_code, name FROM {T('slv_functional_location')} WHERE level = 'Area' AND is_current",
+        ])
+        nm = {r["area_code"]: r["name"] for r in names}
         for f in facs:
+            f["name"] = nm.get(f["area_code"]) or f["area_code"]
             f["pin_colour"] = "red" if (f.get("red") or 0) > 0 else ("amber" if (f.get("amber") or 0) > 0 else "green")
             f["risk_dollars"] = f.get("risk") or 0
         return {"facilities": facs}
@@ -1036,6 +1065,10 @@ def assets_bbox(request: Request):
 
 @app.get("/api/recommendations")
 def recommendations():
+    return JSONResponse(_with_open_wos(_recommendations()))
+
+
+def _recommendations():
     if _lakebase_ok():
         try:
             with _pg_conn().cursor() as cur:
@@ -1043,11 +1076,29 @@ def recommendations():
                                       maturity_level, evidence, status, note, decided_by FROM gas_twin.recommendation_decisions
                                ORDER BY production_at_risk_e3m3d DESC NULLS LAST""")
                 cols = [c.name for c in cur.description]
-                return JSONResponse([{c: _coerce(v) for c, v in zip(cols, r)} for r in cur.fetchall()])
+                return [{c: _coerce(v) for c, v in zip(cols, r)} for r in cur.fetchall()]
         except Exception as e:
             pass
     # fallback to gold (read-only) if Lakebase not wired yet
-    return JSONResponse(q(f"SELECT rec_id, asset_id, constraint_type, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d, recommendation, maturity_level, evidence, 'proposed' status FROM {T('gld_recommendations')} ORDER BY production_at_risk_e3m3d DESC"))
+    return q(f"SELECT rec_id, asset_id, constraint_type, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d, recommendation, maturity_level, evidence, 'proposed' status FROM {T('gld_recommendations')} ORDER BY production_at_risk_e3m3d DESC")
+
+
+def _with_open_wos(recs):
+    """Attach each recommended asset's open work orders (P1 first), so the evidence links to real WOs."""
+    ids = sorted({r["asset_id"] for r in recs if r.get("asset_id")})
+    if not ids:
+        return recs
+    try:
+        lst = ", ".join("'" + i.replace("'", "") + "'" for i in ids)
+        rows = q(f"SELECT asset_id, wo_id, priority FROM {T('gld_workorders')} WHERE status IN ('open','in_progress') AND asset_id IN ({lst}) ORDER BY asset_id, priority, created_date DESC")
+    except Exception:
+        return recs
+    by = {}
+    for w in rows:
+        by.setdefault(w["asset_id"], []).append({"wo_id": w["wo_id"], "priority": w["priority"]})
+    for r in recs:
+        r["open_wos"] = by.get(r.get("asset_id"), [])
+    return recs
 
 
 @app.post("/api/recommendation/{rec_id}")
@@ -1067,38 +1118,6 @@ async def decide(rec_id: str, request: Request):
         return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
 
 
-@app.post("/api/copilot")
-async def copilot(request: Request):
-    body = await request.json()
-    question = (body.get("question") or "").strip()
-    if not question:
-        return JSONResponse({"error": "empty question"}, status_code=400)
-    if not GENIE_SPACE:
-        return JSONResponse({"answer": "Field Copilot (Genie) is not wired to a space yet. Set TWIN_GENIE_SPACE. The curated Genie space answers questions over the gold marts.", "sql": None})
-    try:
-        from databricks.sdk import WorkspaceClient
-        w = WorkspaceClient()
-        conv = w.api_client.do("POST", f"/api/2.0/genie/spaces/{GENIE_SPACE}/start-conversation", body={"content": question})
-        cid = conv.get("conversation_id") or conv.get("conversation", {}).get("id")
-        mid = conv.get("message_id") or conv.get("message", {}).get("id")
-        answer, sql_text = None, None
-        for _ in range(30):
-            msg = w.api_client.do("GET", f"/api/2.0/genie/spaces/{GENIE_SPACE}/conversations/{cid}/messages/{mid}")
-            if msg.get("status") == "COMPLETED":
-                for att in msg.get("attachments", []):
-                    if att.get("text"):
-                        answer = att["text"].get("content")
-                    if att.get("query"):
-                        sql_text = att["query"].get("query")
-                        res = w.api_client.do("GET", f"/api/2.0/genie/spaces/{GENIE_SPACE}/conversations/{cid}/messages/{mid}/query-result")
-                        answer = answer or "See result below."
-                break
-            _time.sleep(1.5)
-        return JSONResponse({"answer": answer or "No answer returned.", "sql": sql_text})
-    except Exception as e:
-        return JSONResponse({"answer": f"Copilot error: {str(e)[:200]}", "sql": None})
-
-
 @app.get("/health")
 def health():
     try:
@@ -1106,6 +1125,212 @@ def health():
         return JSONResponse({"ok": True, "assets": n, "catalog": CATALOG, "schema": SCHEMA})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)[:200]})
+
+
+# ============================ Impact analysis (supply network) ===============================
+# The physical gas path reservoir -> well pad -> gathering hub -> processing train -> compressor ->
+# custody meter -> customer, from gld_supply_nodes / gld_supply_network / gld_customer_supply.
+# Selecting any stop traces everything upstream that feeds it and everything downstream it feeds, and
+# propagates its throughput along the flow splits to say how much gas each downstream customer would
+# lose if that stop stopped. One engine serves the Sankey highlight, the customer bubble and the PDF.
+STOP_LABEL = {"reservoir": "Reservoir", "wells": "Well pad", "gathering": "Gathering hub", "processing": "Processing train",
+              "compression": "Compressor", "custody": "Custody meter", "customer": "Customer"}
+TJ_PER_E3M3 = 0.038
+
+
+def _impact_graph():
+    def load():
+        nodes, links, custs = qmany([
+            f"SELECT node_id, node_name, stop, stop_order, basin, throughput_e3m3d, throughput_tj_d, status FROM {T('gld_supply_nodes')} ORDER BY stop_order, node_id",
+            f"SELECT from_id, to_id, flow_e3m3d, flow_tj_d FROM {T('gld_supply_network')} WHERE flow_e3m3d > 0",
+            f"SELECT * FROM {T('gld_customer_supply')} ORDER BY delivery_point, priority, customer_name",
+        ])
+        window = q(f"SELECT MAX(gas_day) d FROM {T('slv_customer_deliveries')}")
+        return {"nodes": nodes, "links": links, "customers": custs, "as_of": (window[0]["d"] if window else None)}
+    return cached("impact_graph", 300, load)
+
+
+def _impact(node_id):
+    g = _impact_graph()
+    nodes = {n["node_id"]: n for n in g["nodes"]}
+    if node_id not in nodes:
+        return None
+    kids, pars = {}, {}
+    for l in g["links"]:
+        kids.setdefault(l["from_id"], []).append(l)
+        pars.setdefault(l["to_id"], []).append(l)
+    tp = {k: float(n["throughput_e3m3d"] or 0) for k, n in nodes.items()}
+
+    def walk(start, edges, key):
+        seen, stack = set(), [start]
+        while stack:
+            for l in edges.get(stack.pop(), []):
+                nxt = l[key]
+                if nxt not in seen:
+                    seen.add(nxt); stack.append(nxt)
+        return seen
+    down, up = walk(node_id, kids, "to_id"), walk(node_id, pars, "from_id")
+    order = lambda k: nodes[k]["stop_order"] if k in nodes else 9
+    # downstream: push the selected stop's throughput along each link in proportion to the link's share of the node
+    amt = {node_id: tp[node_id]}
+    for n in sorted(down | {node_id}, key=order):
+        a = amt.get(n, 0.0)
+        if not a or not tp.get(n):
+            continue
+        for l in kids.get(n, []):
+            amt[l["to_id"]] = amt.get(l["to_id"], 0.0) + a * float(l["flow_e3m3d"]) / tp[n]
+    # upstream: how much of the selected stop's gas originates at each upstream stop
+    src = {node_id: tp[node_id]}
+    for n in sorted(up | {node_id}, key=order, reverse=True):
+        a = src.get(n, 0.0)
+        ins = pars.get(n, [])
+        tin = sum(float(l["flow_e3m3d"]) for l in ins)
+        if not a or not tin:
+            continue
+        for l in ins:
+            src[l["from_id"]] = src.get(l["from_id"], 0.0) + a * float(l["flow_e3m3d"]) / tin
+    on = {node_id} | up | down
+    links = [f"{l['from_id']}>{l['to_id']}" for l in g["links"]
+             if (l["to_id"] in up | {node_id} and l["from_id"] in up) or (l["from_id"] in down | {node_id} and l["to_id"] in down)]
+    sel = nodes[node_id]
+
+    def row(k, v, base):
+        n = nodes[k]
+        return {"node_id": k, "node_name": n["node_name"], "stop": n["stop"], "stop_label": STOP_LABEL.get(n["stop"], n["stop"]),
+                "basin": n["basin"], "status": n["status"], "throughput_e3m3d": round(tp[k], 1),
+                "flow_e3m3d": round(v, 1), "share_pct": round(100.0 * v / base, 1) if base else None}
+    upstream = sorted([row(k, src.get(k, 0.0), tp[node_id]) for k in up if k in nodes], key=lambda r: (order(r["node_id"]), -r["flow_e3m3d"]))
+    downstream = sorted([row(k, amt.get(k, 0.0), tp[k]) for k in down if k in nodes and nodes[k]["stop"] != "customer"],
+                        key=lambda r: (order(r["node_id"]), -r["flow_e3m3d"]))
+    cust_ids = {k for k in down if nodes.get(k, {}).get("stop") == "customer"}
+    if sel["stop"] == "customer":
+        cust_ids = {node_id}
+        amt[node_id] = tp[node_id]
+    customers = []
+    for c in g["customers"]:
+        if c["customer_id"] not in cust_ids:
+            continue
+        risk_e3 = amt.get(c["customer_id"], 0.0)
+        risk_tj = risk_e3 * TJ_PER_E3M3
+        deliv = float(c["delivered_tj_d"] or 0)
+        px = float(c["price_gj"] or 0)
+        customers.append({**c, "at_risk_tj_d": round(risk_tj, 1), "at_risk_e3m3d": round(risk_e3, 0),
+                          "pct_of_supply": round(100.0 * risk_tj / deliv, 1) if deliv else None,
+                          "revenue_at_risk_per_day": round(risk_tj * 1000.0 * px, 0)})
+    customers.sort(key=lambda c: -c["at_risk_tj_d"])
+    return {"node": {**sel, "stop_label": STOP_LABEL.get(sel["stop"], sel["stop"])}, "as_of": g["as_of"],
+            "highlight_nodes": sorted(on), "highlight_links": links,
+            "upstream": upstream, "downstream": downstream, "customers": customers,
+            "totals": {"upstream_stops": len(upstream), "downstream_stops": len(downstream), "customers": len(customers),
+                       "at_risk_tj_d": round(sum(c["at_risk_tj_d"] for c in customers), 1),
+                       "revenue_at_risk_per_day": round(sum(c["revenue_at_risk_per_day"] for c in customers), 0)}}
+
+
+@app.get("/api/impact/graph")
+def impact_graph():
+    try:
+        return JSONResponse(_impact_graph())
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/impact/select/{node_id}")
+def impact_select(node_id: str):
+    r = _impact(node_id)
+    return JSONResponse(r) if r else JSONResponse({"error": "unknown stop"}, status_code=404)
+
+
+@app.get("/api/impact/pdf/{node_id}")
+def impact_pdf(node_id: str):
+    from fastapi.responses import Response
+    r = _impact(node_id)
+    if not r:
+        return JSONResponse({"error": "unknown stop"}, status_code=404)
+    pdf = _impact_pdf(r)
+    fn = "impact_" + "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in node_id) + ".pdf"
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+def _impact_pdf(r):
+    """A landscape A4 impact report: summary, upstream stops, downstream stops, affected customers."""
+    from fpdf import FPDF
+    from fpdf.fonts import FontFace
+
+    def t(x):   # core PDF fonts are Latin-1: map the few non-Latin-1 characters we use
+        s = "" if x is None else str(x)
+        return s.replace("\u2013", "-").replace("\u2014", "-").replace("’", "'").encode("latin-1", "replace").decode("latin-1")
+
+    def num(v, d=1):
+        return "" if v is None else f"{float(v):,.{d}f}"
+    n, tot = r["node"], r["totals"]
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(True, margin=14)
+    pdf.set_margins(12, 12, 12)
+    pdf.alias_nb_pages()
+
+    def footer():
+        pdf.set_y(-10); pdf.set_font("Helvetica", "", 7.5); pdf.set_text_color(120, 130, 140)
+        pdf.cell(0, 4, t(f"Commercial in confidence. Synthetic demonstration data (fictional customers).   Page {pdf.page_no()} of {{nb}}"), align="R")
+    pdf.footer = footer
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 17); pdf.set_text_color(18, 32, 41)
+    pdf.cell(0, 9, t("Impact analysis: " + n["node_name"]), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9.5); pdf.set_text_color(80, 95, 110)
+    pdf.cell(0, 5, t(f"{n['stop_label']} {n['node_id']}  |  {n.get('basin') or ''} Basin  |  flows are the average gas day over the 30 gas days to {r['as_of']}  |  generated {_dt.datetime.now().strftime('%d %b %Y %H:%M')}"),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    # summary tiles
+    tiles = [("Throughput", f"{num(n['throughput_e3m3d'], 0)} 10³ m³/d"),
+             ("Upstream stops", str(tot["upstream_stops"])), ("Downstream stops", str(tot["downstream_stops"])),
+             ("Customers affected", str(tot["customers"])), ("Gas at risk", f"{num(tot['at_risk_tj_d'])} TJ/d"),
+             ("Revenue at risk", f"${num(tot['revenue_at_risk_per_day'], 0)}/day")]
+    w = (pdf.w - 24 - 5 * 3) / 6
+    y0 = pdf.get_y()
+    for i, (k, v) in enumerate(tiles):
+        x = 12 + i * (w + 3)
+        pdf.set_fill_color(238, 243, 251); pdf.set_draw_color(201, 215, 236); pdf.rect(x, y0, w, 15, style="DF")
+        pdf.set_xy(x + 3, y0 + 2); pdf.set_font("Helvetica", "", 7.5); pdf.set_text_color(95, 113, 133); pdf.cell(w - 6, 4, t(k))
+        pdf.set_xy(x + 3, y0 + 7); pdf.set_font("Helvetica", "B", 11); pdf.set_text_color(18, 32, 41); pdf.cell(w - 6, 6, t(v))
+    pdf.set_y(y0 + 20)
+    pdf.set_font("Helvetica", "", 8.5); pdf.set_text_color(60, 75, 90)
+    pdf.multi_cell(0, 4.2, t("Upstream stops are everything whose gas reaches the selected stop, with how much of its throughput each one supplies. "
+                             "Downstream stops and customers are everything the selected stop feeds; gas at risk is how much of the selected stop's "
+                             "throughput reaches each one along the network's flow splits, i.e. what each would lose if the selected stop stopped."))
+    pdf.ln(2)
+    head = FontFace(emphasis="BOLD", color=(255, 255, 255), fill_color=(47, 125, 196))
+
+    def table(title, cols, rows, widths):
+        pdf.set_font("Helvetica", "B", 11.5); pdf.set_text_color(18, 32, 41)
+        pdf.cell(0, 7, t(title), new_x="LMARGIN", new_y="NEXT")
+        if not rows:
+            pdf.set_font("Helvetica", "", 9); pdf.set_text_color(95, 113, 133)
+            pdf.cell(0, 6, "None.", new_x="LMARGIN", new_y="NEXT"); pdf.ln(2); return
+        pdf.set_font("Helvetica", "", 8); pdf.set_text_color(28, 43, 58)
+        with pdf.table(col_widths=widths, headings_style=head, line_height=5, cell_fill_color=(246, 249, 253),
+                       cell_fill_mode="ROWS", borders_layout="HORIZONTAL_LINES", text_align="LEFT") as tb:
+            hr = tb.row()
+            for c in cols:
+                hr.cell(t(c))
+            for rr in rows:
+                rw = tb.row()
+                for v in rr:
+                    rw.cell(t(v))
+        pdf.ln(4)
+    stop_cols = ["Stop", "Id", "Name", "Basin", "Health", "Throughput (10³ m³/d)"]
+    table(f"Upstream stops feeding {n['node_id']} ({len(r['upstream'])})",
+          stop_cols + ["Gas supplied to it (10³ m³/d)", "Share of its gas"],
+          [[u["stop_label"], u["node_id"], u["node_name"], u["basin"], u["status"], num(u["throughput_e3m3d"], 0), num(u["flow_e3m3d"], 0), f"{num(u['share_pct'])}%"] for u in r["upstream"]],
+          (24, 34, 72, 26, 16, 30, 40, 26))
+    table(f"Downstream stops fed by {n['node_id']} ({len(r['downstream'])})",
+          stop_cols + ["Gas from it (10³ m³/d)", "Share of the stop"],
+          [[d["stop_label"], d["node_id"], d["node_name"], d["basin"], d["status"], num(d["throughput_e3m3d"], 0), num(d["flow_e3m3d"], 0), f"{num(d['share_pct'])}%"] for d in r["downstream"]],
+          (24, 34, 72, 26, 16, 30, 40, 26))
+    table(f"Customers affected ({len(r['customers'])})",
+          ["Customer", "Segment", "Location", "Meter", "Contract", "Priority", "MDQ (TJ/d)", "Delivered (TJ/d)", "Gas at risk (TJ/d)", "% of supply", "Price ($/GJ)", "Revenue at risk ($/d)", "Contract end"],
+          [[c["customer_name"], c["segment"], c["location"], c["delivery_point"], c["contract_type"], str(c["priority"]), num(c["mdq_tj"]), num(c["delivered_tj_d"]),
+            num(c["at_risk_tj_d"]), f"{num(c['pct_of_supply'])}%", num(c["price_gj"], 2), num(c["revenue_at_risk_per_day"], 0), c["contract_end"]] for c in r["customers"]],
+          (42, 24, 30, 14, 22, 13, 17, 19, 20, 16, 16, 22, 18))
+    return bytes(pdf.output())
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -1,4 +1,4 @@
-"""Phase 6 — build the AI/BI (Lakeview) dashboard over the GOLD marts (Design 3.2).
+"""Phase 6: build the AI/BI (Lakeview) dashboard over the GOLD marts (Design 3.2).
 
 MV-only: every dataset is a plain SELECT * from a gold MV. Widget spec versions follow what works on
 this workspace: counter=v2, line/bar=v3, table=v1. Idempotent by display name (create or patch), then

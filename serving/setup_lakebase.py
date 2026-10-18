@@ -1,4 +1,4 @@
-"""Phase 6 GLD-03 — seed the Lakebase (Postgres) recommendation-decisions table + grant the app SP.
+"""Phase 6 GLD-03: seed the Lakebase (Postgres) recommendation-decisions table + grant the app SP.
 
 Reads the advisory recommendations from gold and upserts them into Postgres so the app's Recommendation
 Inbox can accept/reject/annotate with full audit (the shadow-mode, no-autonomy surface, Design Part 4).

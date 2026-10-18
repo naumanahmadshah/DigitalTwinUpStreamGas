@@ -37,8 +37,10 @@ window and run the deploy again.
 
 ## Sign-in / auth problems
 
-- Make sure the `--host` / `-WorkspaceUrl` is the full workspace URL (starts with `https://`).
-- To force a fresh login: `databricks auth login --host <url> --profile gas-twin`.
+- Make sure the `--host` / `-WorkspaceUrl` is the full workspace URL (starts with `https://`). Pasting
+  the whole browser address (with `?o=...`) is fine; the scripts trim it.
+- Passing the URL always signs you in again to exactly that workspace, under a profile named after it
+  (e.g. `gastwin-dbc-1234abcd-5678`), so a stale sign-in to another workspace is never used.
 - If you previously set `DATABRICKS_AUTH_STORAGE` in your environment, unset it (the scripts already do
   this for their own session).
 
@@ -53,12 +55,12 @@ window and run the deploy again.
 If the app resource fails to deploy, confirm **Databricks Apps** is enabled for the workspace
 (**Compute > Apps**). It requires workspace-admin to enable.
 
-## The Copilot says "not wired to a space yet"
+## The Genie lamp is missing from the app header
 
 The Genie space was not discovered after the `surfaces` step (it may still be building, or the
 `surfaces` job hit an issue). Re-run the deploy with `--skip-data`: it rebuilds surfaces, rediscovers
-the space id and restarts the app. You can also confirm a Genie space titled "Gas Upstream Digital
-Twin" exists under **Genie** in the workspace.
+the space id and restarts the app. You can also confirm a Genie space titled "Asset Intelligence
+Genie" exists under **Genie** in the workspace.
 
 ## The dashboard or Genie step warned but the deploy continued
 

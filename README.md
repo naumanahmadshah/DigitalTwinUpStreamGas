@@ -47,9 +47,9 @@ location, live value and its ids in every other system (PI historian, EAM, OSDU,
 | **Catalog + schema** | A Unity Catalog catalog (default `gas_upstream_digital_twin`) and schema (`digital_twin`) holding every table, mart and the landing volume. |
 | **Data generator** | A serverless job that builds the semantic backbone and backfills telemetry, events, work orders, lab assays, weather, prices, spares and more. |
 | **Medallion pipeline** | A serverless Lakeflow (DLT) pipeline: bronze (raw) to silver (conformed) to gold (curated marts). |
-| **The app** | A FastAPI + single-page application: Command Centre, field map, value-chain and cross-landscape tabs, a 3D navigator, an asset explorer, a Genie-backed copilot and a human-in-the-loop recommendation inbox. |
-| **Genie space** | A curated natural-language analytics space over the gold marts only. |
-| **AI/BI dashboard** | A published dashboard summarising field production, reliability and emissions. |
+| **The app** | A FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, Assets map, 3D site views, the Gas flow chain and Analytics tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
+| **Genie space** | "Asset Intelligence Genie": a curated natural-language analytics space over the gold marts only, opened in Databricks One from the app's lamp icon. |
+| **AI/BI dashboard** | A published dashboard, "Gas Upstream Digital Twin", with five pages: Field Command Centre, Wells & Lift, Compression Health, Deferment & Emissions, Custody & UAF. |
 | **Lakebase** | A Postgres instance used for recommendation write-back (accept / reject / annotate, audited). |
 
 ---
@@ -60,10 +60,12 @@ Everything lands in one catalog and schema, parameterised as bundle variables. A
 carry COMMENTs.
 
 - **Generation (the `setup` job).** `build_backbone` writes the semantic backbone (tag registry, asset
-  master, functional-location hierarchy, well master, PVT, id crossmap: 922 assets, 5,561 tags, 500
+  master, functional-location hierarchy, well master, PVT, id crossmap: 923 assets, 5,569 tags, 500
   wells). `run_generator` backfills `land_telemetry` and `land_events` (about 4.5M telemetry rows and
-  358K events over two years). `batch_sources` writes the `src_*` snapshot tables and the files on the
-  landing volume (lab, proving, prices, weather, OSDU well/PVT, geometry, imagery, documents).
+  363K events over two years). `batch_sources` writes the `src_*` snapshot tables and the files on the
+  landing volume (lab, proving, prices, weather, OSDU well/PVT, geometry, imagery, documents), plus the
+  supply network (reservoir to customer) and a fictional customer book of 28 buyers with two years of
+  daily custody deliveries that reconcile to metered production.
 
 - **Landing.** Streaming sources land in the Delta tables `land_telemetry` and `land_events`; the file
   sources are written to the Unity Catalog volume `/Volumes/<catalog>/<schema>/landing` and ingested by
@@ -72,75 +74,75 @@ carry COMMENTs.
   (`AREA-SYSTEM-CLASS-NNNN`) resolves through it to an asset, a functional location and the matching ids
   in PI historian, EAM, OSDU and P&ID, so all downstream marts reconcile on one key.
 
-- **Bronze (raw fidelity, about 27 tables).** Streams `land_telemetry` split by source system (process
+- **Bronze (raw fidelity, about 31 tables).** Streams `land_telemetry` split by source system (process
   telemetry, vibration features, CEMS emissions, custody metering), streams safety/alarm events,
   materialises historian and PI Asset-Framework stand-ins, snapshots the `src_*` CDC tables, and uses
   Auto Loader for the volume files. Raw rows are preserved with ingest metadata.
 
-- **Silver (conformed, typed, contextualized, about 30 tables).** Cleanses and types the telemetry,
+- **Silver (conformed, typed, contextualized, about 33 tables).** Cleanses and types the telemetry,
   joins it to the tag registry, applies SCD where needed on reference and master data, and conforms the
   operational records (work orders, notifications, failures, allocation, deferment, nominations,
-  permits, spares) and context (lab, weather, prices, proving, documents, geometry).
+  permits, spares, customers and deliveries, the supply network) and context (lab, weather, prices,
+  proving, documents, geometry).
 
-- **Gold (32 curated marts, the serving layer).** Business marts and ML proxies the app, Genie and the
+- **Gold (35 curated marts, the serving layer).** Business marts and ML proxies the app, Genie and the
   dashboard consume: field production, well scorecard, compression health, plant KPI, asset state, tag
   latest, constraint ranking, flow assurance, custody allocation, integrity/RBI, safety alarms,
   emissions ledger, deferment, economics, commercial, weather, lab assay, work orders, notifications,
   failure history, maintenance reliability, produced water, energy efficiency, carbon compliance,
   methane LDAR, margin, spares risk, capital plan, remaining useful life, liquid-loading risk,
-  production forecast and recommendations. Gold is the only layer Genie is allowed to query.
+  production forecast, recommendations, and the impact-analysis marts (supply network with flows, supply
+  nodes, customer supply). Gold is the only layer Genie is allowed to query.
 
 ---
 
 ## Application features
 
-The app opens on the Command Centre. The left menu is a flat list; a short tour follows (full version
-in [`docs/NAVIGATION.md`](docs/NAVIGATION.md)).
+The app ("Databricks Asset Intelligence") opens on the Command Centre. The left menu has six items:
+Command Centre, Assets map, Gas flow chain, Analytics, Recommendation Inbox and Asset & Document
+Explorer. A short tour follows; the full screen-by-screen guide is in
+[`docs/NAVIGATION.md`](docs/NAVIGATION.md).
 
-**Home**
-- **Command Centre** - the executive home: field actual vs nominated production, production at risk, the
-  current field constraint and why, open work, recorded failures and carbon intensity. Every tile and
-  the constraint spine are clickable and drill down.
-- **Field Map** - the field across the Australian gas basins. Markers are facilities, sized by asset
-  count and coloured by risk; click one to open an asset or jump into the 3D navigator.
+**Command Centre and what opens from it**
+- **Command Centre** - the field rate, the difference from commitment, the current bottleneck, the
+  value chain as five pictures (the stop under pressure is red), production against commitment, and
+  tiles for deferment, carbon intensity, red assets, ESD trips and open work orders. Everything is
+  clickable.
+- **Impact analysis** (the flow icon on the top tile) - the whole gas path as a Sankey: reservoirs,
+  well pads, gathering hubs, processing trains, compressors, custody meters and the customers the gas
+  is custody-transferred to. Click any stop to highlight everything upstream that feeds it and
+  everything downstream it supplies; a speech bubble lists the affected customers with the gas each
+  would lose (TJ/d and % of its supply). **Download Impact Details (PDF)** exports the full upstream,
+  downstream and customer tables.
+- **Field Map** (the map icon on the top tile) - every site across the Australian gas basins, grouped
+  into "N sites" bubbles; hover a site for its details, click it to open its **3D site view**.
+- **3D site view** - the site's equipment in 3D; click an asset or its tag to slide in its full detail.
 
-**Gas flow chain** (the five value-chain stops, as tabs)
-- Reservoirs & Wells, Gathering & Flow Assurance (hydrate margin), Processing / CPF (dewpoint and spec
-  margins), Compression Health (the flagship vibration-to-RUL story), Custody Transfer & Export
-  (metered vs allocated, unaccounted-for gas).
-
-**Cross Landscape Reports** (cross-cutting, as tabs)
-- Integrity & RBI, Safety & Alarms, Emissions & Carbon, Deferment & Losses, Cost & Economics,
-  Planning & Maintenance, and the **Recommendation Inbox** (accept / reject / annotate, written back
-  and audited to Lakebase).
-
-**Asset 360 context**
-- Lab & Assay, Commercial & Prices, Weather & Environment (a per-location weather map).
-
-**Sustainability**
-- Produced Water Management, Fuel-Gas & Energy Efficiency, Carbon / Safeguard Compliance, Methane LDAR.
-
-**Business and planning**
-- Molecule-to-Market Margin, Spares & Procurement Risk (what to procure, lead time vs RUL), Capital &
-  Decline-Aware Investment.
-
-**Explorer and copilot**
+**Menu**
+- **Assets map** - every asset (wellhead, gathering line, compressor, separator, meter, plant unit) on
+  the map, one typed marker each; click one for its detail.
+- **Gas flow chain** - the five value-chain stops as tabs: Reservoirs & Wells, Gathering & Flow
+  Assurance (hydrate margin), Processing / CPF (dewpoint and spec margins), Compression Health (the
+  vibration-to-remaining-life story), Custody Transfer & Export (metered vs allocated, UAF).
+- **Analytics** - every cross-cutting report as a tab: Integrity & RBI, Safety & Alarms, Emissions &
+  Carbon, Deferment & Losses, Cost & Economics, Planning & Maintenance, Lab & Assay, Commercial &
+  Prices, Weather & Environment (a per-site weather map), Produced Water Management, Fuel-Gas & Energy
+  Efficiency, Carbon / Safeguard Compliance, Methane LDAR, Molecule-to-Market Margin, Spares &
+  Procurement Risk (what to procure, lead time vs remaining life), Capital & Decline-Aware Investment.
+- **Recommendation Inbox** - prescriptive recommendations with their evidence and linked open work
+  orders: accept / reject / annotate, written back and audited to Lakebase, with Undo.
 - **Asset & Document Explorer** - resolve any tag end to end on the left (decoded key, asset link,
   functional location, latest reading with its normal range, and its ids in every other system) and
   browse the physical-location tree on the right (field to area to asset to tag).
-- **Ask me anything** - the Field Copilot answers in natural language over the gold marts via the Genie
-  space, or jumps straight into Genie.
 
-**Interaction patterns across every screen**
-- Tiles open full lists; table rows open a context-aware detail drawer (a work-order row opens the work
-  order, any other row opens that asset's 360 with telemetry sparklines, work orders, notifications,
-  failures, procurement, lab and live tags); charts open a zoom modal; a 3D navigator renders the
-  value-chain stops.
-
-**Platform features**
-- A connection pool and concurrent query runner keep the app responsive against the SQL warehouse;
-  Lakebase provides audited write-back; Genie answers over the curated marts; the AI/BI dashboard gives
-  a published summary.
+**Across every screen**
+- Sortable tables with an **i** on every column; table rows open a detail panel (a work-order row opens
+  the work order, any other row opens that asset's detail with telemetry charts, work orders,
+  notifications, failures, procurement, lab, deferment and live tags, plus **View site**).
+- Every work-order id anywhere is a link to the work order.
+- The Genie lamp (top right) opens **Asset Intelligence Genie** in Databricks One.
+- A connection pool and concurrent queries keep screens fast against the SQL warehouse; Lakebase
+  provides the audited write-back.
 
 ---
 
@@ -164,14 +166,14 @@ scripts/deploy.sh --host https://your-workspace.cloud.databricks.com
 That is the whole thing. A browser window opens for you to sign in (OAuth); the script then runs end to
 end and prints the app URL and catalog at the finish. Passing `--host` always signs you in to exactly
 that workspace, so you cannot accidentally deploy to a stale cached one. If you omit the URL, the script
-reuses an existing sign-in if the profile already has one, or prompts you for the URL if not, so a bare
-`scripts/deploy.sh` works too.
+asks for it, so a bare `scripts/deploy.sh` works too (with `--profile NAME` instead, it reuses that
+profile's existing sign-in).
 
 ### Options
 
 | macOS/Linux flag | Windows flag | Default | Meaning |
 |------------------|--------------|---------|---------|
-| `--host URL` | `-WorkspaceUrl URL` | prompted | Workspace URL. If omitted and not signed in, the script asks. |
+| `--host URL` | `-WorkspaceUrl URL` | prompted | Workspace URL. If omitted, the script asks for it. |
 | `--catalog NAME` | `-Catalog NAME` | `gas_upstream_digital_twin` | Target catalog. Created if it does not exist. |
 | `--schema NAME` | `-Schema NAME` | `digital_twin` | Target schema. |
 | `--warehouse ID` | `-Warehouse ID` | auto | Use a specific SQL warehouse instead of auto-detect/create. |
@@ -228,7 +230,7 @@ When the script finishes it prints a summary like this:
 ```
   App:        https://gas-upstream-twin-xxxxxxxx.<region>.databricksapps.com
   Catalog:    gas_upstream_digital_twin.digital_twin
-  Genie:      https://your-workspace.cloud.databricks.com/genie/rooms/<id>
+  Genie:      https://your-workspace.cloud.databricks.com/one/agents/<id>
   Dashboard:  open Dashboards > "Gas Upstream Digital Twin"
   Warehouse:  <id>
 ```
@@ -236,7 +238,8 @@ When the script finishes it prints a summary like this:
 - **App**: open the printed URL and start at the **Command Centre**.
 - **Catalog**: open **Catalog** and browse `gas_upstream_digital_twin.digital_twin`. The `gld_*` tables
   are the curated marts; `slv_*` are conformed; `bronze_*` are raw.
-- **Genie**: open the printed Genie link and ask questions over the marts.
+- **Genie**: open the printed Genie link (it opens **Asset Intelligence Genie** in Databricks One), or
+  click the lamp at the top right of the app, and ask questions over the marts.
 - **Dashboard**: open **Dashboards** and select "Gas Upstream Digital Twin".
 
 Start with [`docs/NAVIGATION.md`](docs/NAVIGATION.md) for a guided tour of the app.
@@ -294,8 +297,8 @@ are idempotent: if a step fails, fix the cause and re-run the same command. High
   `--catalog <existing>`.
 - **Lakebase not ready**: Lakebase must be available in your workspace region; provisioning takes a few
   minutes.
-- **The copilot says "not wired to a space yet"**: re-run with `--skip-data` to rebuild surfaces and
-  restart the app.
+- **No Genie lamp in the header**: the Genie space was not found at deploy time; re-run with `--skip-data`
+  to rebuild surfaces and restart the app.
 
 ---
 

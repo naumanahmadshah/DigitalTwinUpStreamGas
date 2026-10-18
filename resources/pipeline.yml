@@ -1,4 +1,4 @@
-# Lakeflow Declarative Pipeline (DLT) — the bronze -> silver -> gold medallion.
+# Lakeflow Declarative Pipeline (DLT): the bronze -> silver -> gold medallion.
 # Reads the landing tables + landing volume written by the setup job, and publishes the curated
 # gold marts the app, Genie and the dashboard query. Serverless; no manual cluster config.
 # Paths are relative to this file (resources/), hence ../pipelines/...

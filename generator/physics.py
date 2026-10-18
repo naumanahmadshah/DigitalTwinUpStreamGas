@@ -1,4 +1,4 @@
-"""Layer 2 — the state core (physics and behaviour), Data-gen 9.2.
+"""Layer 2: the state core (physics and behaviour), Data-gen 9.2.
 
 One shared, deterministic model drives every emitter, so telemetry, allocation, custody, deferment,
 emissions and economics reconcile by construction (9.7): a reservoir pressure drop shows up on the
@@ -96,7 +96,7 @@ def signal_value(sig: str, tag: dict, asset: dict, wctx: dict | None, ctx: dict,
         # offset (4..15 degC above ambient) is stable per line; short near-inlet trunks stay warm, long
         # downstream legs run close to ambient. In deep winter the coolest legs approach the gas-hydrate
         # formation temperature (~19-20 degC at line pressure), so a few segments show a tight approach
-        # margin seasonally — a believable flow-assurance watch, not a fabricated crisis.
+        # margin seasonally: a believable flow-assurance watch, not a fabricated crisis.
         v = amb + 4 + 11 * _h(tag["tag_id"], "lt")
     elif sig == "esd_status":
         v = 0 if mods.get("esd_trip", 0) else 100
@@ -187,7 +187,7 @@ def signal_value(sig: str, tag: dict, asset: dict, wctx: dict | None, ctx: dict,
         else:
             v = 1 + 1 * _h(tag["tag_id"], "ch4") + 60 * mods.get("emissions", 0.0)   # flare slip + episode
     elif sig == "co2_massrate":
-        # Stationary-combustion CO2 split across its real sources — compression fuel gas (the dominant
+        # Stationary-combustion CO2 split across its real sources: compression fuel gas (the dominant
         # driver across the trains), utility turbines/gensets, and flaring. The total across sources is
         # sized so field carbon intensity lands ~55-65 kg CO2 / 10^3 m^3, a believable upstream figure.
         et = asset.get("equipment_type")

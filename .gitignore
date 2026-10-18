@@ -1,4 +1,4 @@
-# Rendered at deploy time from app.yaml.tmpl — never commit (contains the resolved Lakebase host etc.)
+# Rendered at deploy time from app.yaml.tmpl: never commit (contains the resolved Lakebase host etc.)
 app/app.yaml
 
 # Databricks bundle local state

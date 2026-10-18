@@ -74,9 +74,9 @@
         <div class="d">Serverless job &middot; writes directly to the catalog</div>
       </div>
       <div class="body" style="--ac:var(--gen)">
-        <div class="card"><div class="ct">Semantic backbone</div><div class="cd">tag &rarr; asset &rarr; functional location, plus cross-system ids. 922 assets, 5,561 tags, 500 wells.</div></div>
-        <div class="card"><div class="ct">Telemetry + event backfill</div><div class="cd">~2 years of process, vibration, CEMS and custody signals. 4.5M rows + 358K events.</div></div>
-        <div class="card"><div class="ct">Batch and CDC sources</div><div class="cd">EAM (work orders, failures), production accounting, workforce, HSE, spares, contracts.</div></div>
+        <div class="card"><div class="ct">Semantic backbone</div><div class="cd">tag &rarr; asset &rarr; functional location, plus cross-system ids. 923 assets, 5,569 tags, 500 wells.</div></div>
+        <div class="card"><div class="ct">Telemetry + event backfill</div><div class="cd">~2 years of process, vibration, CEMS and custody signals. 4.5M rows + 363K events.</div></div>
+        <div class="card"><div class="ct">Batch and CDC sources</div><div class="cd">EAM (work orders, failures), production accounting, workforce, HSE, spares, the supply network, 28 (fictional) customers and their daily deliveries.</div></div>
         <div class="card"><div class="ct">File sources</div><div class="cd">Lab assays, meter proving, prices, per-location weather, OSDU well/PVT, documents, geometry.</div></div>
       </div>
     </div>
@@ -91,7 +91,7 @@
       </div>
       <div class="body" style="--ac:var(--land)">
         <div class="card"><div class="ct">Streaming landing tables</div><div class="cd"><code>land_telemetry</code>, <code>land_events</code> (Delta, append).</div></div>
-        <div class="card"><div class="ct">Source snapshots</div><div class="cd"><code>src_*</code> CDC/batch tables for EAM, PA, HR, HSE, spares, contracts.</div></div>
+        <div class="card"><div class="ct">Source snapshots</div><div class="cd"><code>src_*</code> CDC/batch tables for EAM, PA, HR, HSE, spares, customers, supply network.</div></div>
         <div class="card"><div class="ct">Backbone tables</div><div class="cd">tag registry, asset / functional-location / well master, PVT, id crossmap.</div></div>
         <div class="card"><div class="ct">Landing volume</div><div class="cd"><code>/Volumes/.../landing</code>: CSV + JSON files for Auto Loader.</div></div>
       </div>
@@ -103,7 +103,7 @@
     <div class="stage">
       <div class="cap" style="background:var(--bronze)">
         <div class="n">Step 3</div><div class="t">Bronze</div>
-        <div class="d">Raw fidelity &middot; ~27 tables</div>
+        <div class="d">Raw fidelity &middot; ~31 tables</div>
       </div>
       <div class="body" style="--ac:var(--bronze)">
         <div class="card"><div class="ct">Streaming by source system</div><div class="cd">process telemetry, vibration features, CEMS emissions, custody metering.</div></div>
@@ -119,12 +119,12 @@
     <div class="stage">
       <div class="cap" style="background:var(--silver)">
         <div class="n">Step 4</div><div class="t">Silver</div>
-        <div class="d">Conformed, typed, contextualized &middot; ~30 tables</div>
+        <div class="d">Conformed, typed, contextualized &middot; ~33 tables</div>
       </div>
       <div class="body" style="--ac:var(--silver)">
         <div class="card"><div class="ct">Conformed telemetry</div><div class="cd">process + vibration + emissions + metering time series, joined to the tag registry.</div></div>
         <div class="card"><div class="ct">Reference and master</div><div class="cd">asset, tag, functional location, well, PVT (SCD where needed).</div></div>
-        <div class="card"><div class="ct">Operational records</div><div class="cd">work orders, notifications, failures, allocation, deferment, nominations, permits, spares.</div></div>
+        <div class="card"><div class="ct">Operational records</div><div class="cd">work orders, notifications, failures, allocation, deferment, nominations, permits, spares, customer deliveries.</div></div>
         <div class="card"><div class="ct">Context</div><div class="cd">lab assays, weather, prices, custody proving, documents, geometry.</div></div>
       </div>
     </div>
@@ -135,13 +135,13 @@
     <div class="stage">
       <div class="cap" style="background:var(--gold)">
         <div class="n">Step 5</div><div class="t">Gold marts</div>
-        <div class="d">The serving layer &middot; 32 marts (Genie reads these only)</div>
+        <div class="d">The serving layer &middot; 35 marts (Genie reads these only)</div>
       </div>
       <div class="body" style="--ac:var(--gold)">
         <div class="card"><div class="ct">Production and constraint</div><div class="cd">field production, well scorecard, plant KPI, asset state, constraint ranking, flow assurance, custody.</div></div>
         <div class="card"><div class="ct">Reliability and integrity</div><div class="cd">compression health, work orders, failures, maintenance reliability, integrity / RBI, spares risk.</div></div>
         <div class="card"><div class="ct">Emissions and sustainability</div><div class="cd">emissions ledger, carbon compliance, methane LDAR, produced water, energy efficiency.</div></div>
-        <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, molecule-to-market margin, capital plan, deferment, lab, weather.</div></div>
+        <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, margin, capital plan, deferment, lab, weather; supply network, customer supply (impact analysis).</div></div>
         <div class="card"><div class="ct">Predictive and advisory</div><div class="cd">remaining useful life, liquid-loading risk, production forecast, recommendations.</div></div>
       </div>
     </div>
@@ -155,8 +155,8 @@
         <div class="d">How users and agents access it</div>
       </div>
       <div class="body" style="--ac:var(--serve)">
-        <div class="card"><div class="ct">Digital twin app</div><div class="cd">FastAPI + single-page UI. Reads the gold marts through a SQL warehouse (pooled, concurrent).</div></div>
-        <div class="card"><div class="ct">Genie space</div><div class="cd">natural-language analytics over the gold marts only.</div></div>
+        <div class="card"><div class="ct">Digital twin app</div><div class="cd">FastAPI + single-page UI: Command Centre, maps, 3D sites, analytics and reservoir-to-customer impact analysis (with PDF export).</div></div>
+        <div class="card"><div class="ct">Genie space</div><div class="cd">&ldquo;Asset Intelligence Genie&rdquo;: natural-language analytics over the gold marts only, opened in Databricks One.</div></div>
         <div class="card"><div class="ct">AI/BI dashboard</div><div class="cd">published summary of production, reliability and emissions.</div></div>
         <div class="card"><div class="ct">Lakebase write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions to a Postgres instance (audited).</div></div>
       </div>
@@ -176,7 +176,7 @@
     <div class="note"><h4>Compute</h4><p>Everything runs on serverless: the generation job, the Lakeflow medallion pipeline, the SQL warehouse behind the app / Genie / dashboard, and the Lakebase instance.</p></div>
     <div class="note"><h4>Governance</h4><p>All objects live in one Unity Catalog catalog and schema. Tables and columns carry COMMENTs; the app service principal is granted read access on the schema.</p></div>
     <div class="note"><h4>Parameterized</h4><p>Catalog, schema, warehouse and Lakebase instance are bundle variables, so one asset bundle deploys to any workspace with a single command.</p></div>
-    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the copilot shows a "not wired yet" note; without Lakebase the recommendation inbox is read-only. The core twin still serves.</p></div>
+    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the header Genie link is simply hidden; without Lakebase the recommendation inbox is read-only. The core twin still serves.</p></div>
   </div>
 
   <footer>Gas Upstream Digital Twin &middot; bronze - silver - gold on Databricks &middot; see README.md for deployment</footer>

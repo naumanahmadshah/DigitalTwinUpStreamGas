@@ -96,6 +96,7 @@ def generate(spark, cfg, catalog, schema):
 
     # ---- allocation + deferment + nominations (per well per gas day) ---------------------
     alloc_rows, defer_rows, nom_rows = [], [], []
+    pad_day = {}   # (gas_day, pad) -> allocated e3m3: drives what each custody meter, and so each customer, receives
     defer_id = 0
     wells_by_wh = idx["wells_by_wh"]
     comp_assets = [a for a in assets if a["equipment_type"] == "compressor"]
@@ -121,6 +122,7 @@ def generate(spark, cfg, catalog, schema):
             alloc_rows.append({"gas_day": gas_day, "well_id": w["well_id"], "asset_id": wh,
                                "area_code": w["pad_area"], "produced_e3m3": actual,
                                "allocated_e3m3": allocated})
+            pad_day[(gas_day, w["pad_area"])] = pad_day.get((gas_day, w["pad_area"]), 0.0) + allocated
             loss = potential - actual
             if loss > max(2.0, 0.03 * potential):
                 cause, desc = _defer_cause(scen, asset, w, d)
@@ -261,6 +263,9 @@ def generate(spark, cfg, catalog, schema):
                   "iso14224_code": "ISO 14224 failure-mode code.", "failure_mode": "Mode.", "downtime_hours": "Downtime (h).",
                   "updated_at": "CDC commit time."})
 
+    # ---- supply network + customers + daily deliveries + their gas-sales contracts -------
+    _supply_and_customers(spark, catalog, schema, cfg, bb, pad_day, price_by_day, start, end)
+
     # ---- workforce / permits / MOC / spares (the connected-asset cross-domain play) ------
     _connected_asset_sources(spark, catalog, schema, cfg, assets, wells, start, end, rng, vib_target)
 
@@ -371,26 +376,6 @@ def _connected_asset_sources(spark, catalog, schema, cfg, assets, wells, start, 
                   "for_area": "Area it serves.", "on_hand": "Units on hand.",
                   "lead_time_days": "Procurement lead time (days).", "unit_cost": "Unit cost (AUD)."})
 
-    # ---- commercial gas-sales contracts (#1 margin) : keyed to the custody delivery point --------
-    counterparties = ["Southern Cross Energy", "Coral Coast Gas Retail", "Outback Power Co", "Meridian LNG Trading", "Tasman Industrial Gas"]  # fictional
-    custody_areas = [st["area"] for st in cfg["custody"]["stations"]]
-    contracts = []
-    for i, area in enumerate(custody_areas):
-        for j in range(2):
-            k = i * 2 + j
-            contracts.append({"contract_id": f"GSA-{k:03d}", "counterparty": counterparties[k % len(counterparties)],
-                              "delivery_point": area, "daily_qty_e3m3": round(rng.uniform(1500, 4200), 0),
-                              "price_basis_gj": round(rng.uniform(9.0, 13.0), 2), "take_or_pay_pct": rng.choice([80, 85, 90]),
-                              "start_date": start.strftime("%Y-%m-%d"), "end_date": (end + dt.timedelta(days=365)).strftime("%Y-%m-%d")})
-    _write_delta(spark, catalog, schema, "src_commercial_contracts",
-                 _S(("contract_id", "string"), ("counterparty", "string"), ("delivery_point", "string"),
-                    ("daily_qty_e3m3", "double"), ("price_basis_gj", "double"), ("take_or_pay_pct", "int"),
-                    ("start_date", "string"), ("end_date", "string")),
-                 contracts, "Gas-sales agreements (GSAs): each contract names a custody delivery point and a daily contracted quantity (the real join key from the trading book to metered production). Feeds the molecule-to-market margin.",
-                 {"contract_id": "Contract id.", "counterparty": "Buyer.", "delivery_point": "Custody station the gas is delivered at (join key to metering).",
-                  "daily_qty_e3m3": "Contracted daily quantity (10^3 m^3).", "price_basis_gj": "Contract price ($/GJ).",
-                  "take_or_pay_pct": "Take-or-pay floor (%).", "start_date": "Start.", "end_date": "End."})
-
     # ---- development / capex schedule (#6 capital & decline) : keyed to area + planned date ------
     dev = []
     ptypes = [("infill_well", 1.2e7, 350), ("workover", 1.5e6, 120), ("compression_upgrade", 3.0e7, 900), ("dehydration_debottleneck", 8.0e6, 180)]
@@ -410,6 +395,136 @@ def _connected_asset_sources(spark, catalog, schema, cfg, assets, wells, start, 
                  {"project_id": "Project id.", "area_code": "Area the project targets (join key to decline forecast).", "project_type": "Project type.",
                   "capex_dollars": "Capital cost (AUD).", "expected_uplift_e3m3d": "Expected production uplift (10^3 m^3/d).",
                   "planned_date": "Planned execution date.", "status": "Maturity (proposed/approved/fel-2)."})
+
+
+def _supply_and_customers(spark, catalog, schema, cfg, bb, pad_day, price_by_day, start, end):
+    """The physical supply network, the customer book, and what each customer received each gas day.
+
+    Each custody meter's daily sales gas = the allocated gas of every pad whose train routes to it
+    (by the train's custody split), less processing shrink (fuel gas + CO2/inert removal). That gas is
+    shared across the meter's customers by contract weight with day-to-day swing, so customer
+    deliveries reconcile to metered production. Contract MDQ is sized from the recent metered volume.
+    """
+    import asset_model
+    edges = asset_model.supply_network(cfg, bb)
+    _write_delta(spark, catalog, schema, "src_supply_network",
+                 _S(("from_id", "string"), ("from_name", "string"), ("from_stop", "string"), ("to_id", "string"),
+                    ("to_name", "string"), ("to_stop", "string"), ("share", "double"), ("basin", "string")),
+                 edges, "Physical supply network: directed edges reservoir -> well pad -> gathering hub -> processing train -> compressor -> custody meter -> customer, with the share of the from-node outflow taking each edge. The basis of upstream/downstream impact analysis.",
+                 {"from_id": "Upstream node id (reservoir, pad area, hub area, train area, compressor asset, meter area).",
+                  "from_name": "Upstream node name.", "from_stop": "Upstream value-chain stop (reservoir, wells, gathering, processing, compression, custody).",
+                  "to_id": "Downstream node id.", "to_name": "Downstream node name.", "to_stop": "Downstream value-chain stop (adds customer).",
+                  "share": "Share of the upstream node outflow that takes this edge (null when set by the pad production itself).",
+                  "basin": "Gas basin the edge sits in."})
+
+    shrink = float((cfg.get("network") or {}).get("processing_shrink", 0.03))
+    ptrain = asset_model.pad_train(edges)
+    tsplit = {}
+    for e in edges:
+        if e["from_stop"] == "compression":
+            tsplit.setdefault(e["from_id"].split("-")[0], {})[e["to_id"]] = e["share"]
+    custs = cfg.get("customers") or []
+    meter_day = {}   # (gas_day, meter) -> sales gas e3m3
+    for (gd, pad), v in pad_day.items():
+        for m, sh in tsplit.get(ptrain.get(pad), {}).items():
+            meter_day[(gd, m)] = meter_day.get((gd, m), 0.0) + v * sh * (1 - shrink)
+    days = sorted({gd for gd, _ in meter_day})
+    recent = days[-90:]
+    by_meter = {}
+    for i, c in enumerate(custs):
+        by_meter.setdefault(c["delivery_point"], []).append(i)
+    swing = {"Firm GSA": 0.10, "LNG SPA": 0.06, "Interruptible": 0.30, "Spot": 0.55}
+    uplift = {"Firm GSA": 1.08, "LNG SPA": 1.05, "Interruptible": 1.15, "Spot": 1.30}
+    tj = GJ_PER_E3M3 / 1000.0
+    import physics
+    # contracts: MDQ from the recent average the customer's weight implies
+    book = []
+    for m, idxs in by_meter.items():
+        avg_m = sum(meter_day.get((gd, m), 0.0) for gd in recent) / max(1, len(recent))
+        for i in idxs:
+            c = custs[i]
+            mdq = round(avg_m * c["weight"] * tj * uplift.get(c["contract"], 1.1), 1)
+            # every contract is live across the data window: signed before it, running past it
+            cstart = start - dt.timedelta(days=int(365 * (1 + 3 * physics._h(c["name"], "age", start.date()))))
+            cend = (cstart + dt.timedelta(days=365 * 20)) if c["contract"] == "LNG SPA" else \
+                   (end + dt.timedelta(days=int(120 + 1400 * physics._h(c["name"], "term", start.date()))))
+            book.append({"customer_id": asset_model.customer_id(i), "customer_name": c["name"], "segment": c["segment"],
+                         "location": c["location"], "delivery_point": m, "contract_id": f"GSA-{i + 1:03d}" if c["contract"] != "LNG SPA" else f"SPA-{i + 1:03d}",
+                         "contract_type": c["contract"], "mdq_tj": mdq, "acq_pj": round(mdq * 365 * 0.9 / 1000.0, 2),
+                         "price_gj": c.get("price_gj"), "take_or_pay_pct": {"Firm GSA": 85, "LNG SPA": 90, "Interruptible": 0, "Spot": 0}[c["contract"]],
+                         "priority": int(c["priority"]), "weight": float(c["weight"]),
+                         "contract_start": cstart.strftime("%Y-%m-%d"),
+                         "contract_end": cend.strftime("%Y-%m-%d")})
+    _write_delta(spark, catalog, schema, "src_customers",
+                 _S(("customer_id", "string"), ("customer_name", "string"), ("segment", "string"), ("location", "string"),
+                    ("delivery_point", "string"), ("contract_id", "string"), ("contract_type", "string"), ("mdq_tj", "double"),
+                    ("acq_pj", "double"), ("price_gj", "double"), ("take_or_pay_pct", "int"), ("priority", "int"),
+                    ("weight", "double"), ("contract_start", "string"), ("contract_end", "string")),
+                 book, "Customer book (fictional buyers): who the sales gas is custody-transferred to, at which meter, under what contract (MDQ, annual quantity, price, take-or-pay, curtailment priority).",
+                 {"customer_id": "Customer id.", "customer_name": "Buyer (fictional).", "segment": "Customer segment (retail, power generation, industrial, LNG export, mining, spot market...).",
+                  "location": "Where the customer takes the gas.", "delivery_point": "Custody meter the gas is delivered at (join key to metering + the supply network).",
+                  "contract_id": "Gas-sales agreement (GSA) or LNG sale-and-purchase agreement (SPA) id.", "contract_type": "Firm GSA, LNG SPA, Interruptible or Spot.",
+                  "mdq_tj": "Maximum daily quantity (TJ/d).", "acq_pj": "Annual contract quantity (PJ/yr).", "price_gj": "Contract price (AUD/GJ); null = market (spot) price.",
+                  "take_or_pay_pct": "Take-or-pay floor (% of MDQ); 0 = none.", "priority": "Curtailment priority: 1 firm (curtailed last) .. 3 spot (curtailed first).",
+                  "weight": "Contract share of the delivery point sales gas.", "contract_start": "Contract start.", "contract_end": "Contract end."})
+
+    # daily deliveries. Each customer nominates against its contract; the meter's sales gas is then
+    # scheduled in curtailment order: firm GSA + LNG SPA (priority 1) first, pro-rata if short, then
+    # interruptible (priority 2), and spot (priority 3) takes whatever is left (surplus is sold spot).
+    book_by_id = {b["customer_id"]: b for b in book}
+    rows = []
+    for gd in days:
+        dd = dt.date.fromisoformat(gd)
+        for m, idxs in by_meter.items():
+            left = meter_day.get((gd, m), 0.0) * tj          # TJ available at the meter today
+            cb = [book_by_id[asset_model.customer_id(i)] for i in idxs]
+            want = {}
+            for b in cb:
+                h = physics._h(b["customer_name"], "nom", dd)
+                if b["contract_type"] in ("Firm GSA", "LNG SPA"):
+                    want[b["customer_id"]] = b["mdq_tj"] * (0.84 + 0.12 * h)        # load factor 84-96% of MDQ
+                elif b["contract_type"] == "Interruptible":
+                    want[b["customer_id"]] = b["mdq_tj"] * (0.55 + 0.40 * h)
+            got = {}
+            for prio in (1, 2):
+                grp = [b for b in cb if b["priority"] == prio and b["customer_id"] in want]
+                need = sum(want[b["customer_id"]] for b in grp)
+                f = 1.0 if need <= left or need == 0 else left / need
+                for b in grp:
+                    got[b["customer_id"]] = want[b["customer_id"]] * f
+                left -= sum(got[b["customer_id"]] for b in grp)
+            spot = [b for b in cb if b["customer_id"] not in want]
+            sw = sum(b["weight"] for b in spot) or 1.0
+            for b in spot:
+                got[b["customer_id"]] = max(0.0, left) * b["weight"] / sw
+                want[b["customer_id"]] = got[b["customer_id"]]      # spot nominates what it trades
+            for b in cb:
+                deliv = got[b["customer_id"]]
+                px = b["price_gj"] if b["price_gj"] is not None else round(price_by_day.get(dd, 10.0) * (0.95 + 0.15 * physics._h(b["customer_name"], "px", dd)), 2)
+                rows.append({"gas_day": gd, "customer_id": b["customer_id"], "delivery_point": m,
+                             "nominated_tj": round(want[b["customer_id"]], 2), "delivered_tj": round(deliv, 2),
+                             "delivered_e3m3": round(deliv / tj, 1), "price_gj": px,
+                             "revenue_dollars": round(deliv * 1000.0 * px, 0)})
+    _write_delta(spark, catalog, schema, "src_customer_deliveries",
+                 _S(("gas_day", "string"), ("customer_id", "string"), ("delivery_point", "string"), ("nominated_tj", "double"),
+                    ("delivered_tj", "double"), ("delivered_e3m3", "double"), ("price_gj", "double"), ("revenue_dollars", "double")),
+                 rows, "Daily custody-transfer deliveries per customer: nominated vs delivered energy (TJ) and volume at the delivery meter, with price and revenue. Reconciles to metered sales gas.",
+                 {"gas_day": "Gas day (YYYY-MM-DD).", "customer_id": "Customer id.", "delivery_point": "Custody meter.",
+                  "nominated_tj": "Customer nomination for the day (TJ).", "delivered_tj": "Energy delivered (TJ).",
+                  "delivered_e3m3": "Volume delivered (10^3 m^3).", "price_gj": "Price applied (AUD/GJ).", "revenue_dollars": "Revenue (AUD)."})
+
+    # the trading book the margin mart reads: one gas-sales contract per customer
+    contracts = [{"contract_id": b["contract_id"], "counterparty": b["customer_name"], "delivery_point": b["delivery_point"],
+                  "daily_qty_e3m3": round(b["mdq_tj"] / tj, 0), "price_basis_gj": b["price_gj"] if b["price_gj"] is not None else round(sum(price_by_day.values()) / len(price_by_day), 2),
+                  "take_or_pay_pct": b["take_or_pay_pct"], "start_date": b["contract_start"], "end_date": b["contract_end"]} for b in book]
+    _write_delta(spark, catalog, schema, "src_commercial_contracts",
+                 _S(("contract_id", "string"), ("counterparty", "string"), ("delivery_point", "string"),
+                    ("daily_qty_e3m3", "double"), ("price_basis_gj", "double"), ("take_or_pay_pct", "int"),
+                    ("start_date", "string"), ("end_date", "string")),
+                 contracts, "Gas-sales agreements (GSAs / LNG SPAs), one per customer: each names a custody delivery point and a daily contracted quantity (the join key from the trading book to metered production). Feeds the molecule-to-market margin.",
+                 {"contract_id": "Contract id.", "counterparty": "Buyer (fictional).", "delivery_point": "Custody station the gas is delivered at (join key to metering).",
+                  "daily_qty_e3m3": "Contracted daily quantity (10^3 m^3).", "price_basis_gj": "Contract price ($/GJ); spot contracts carry the average market price.",
+                  "take_or_pay_pct": "Take-or-pay floor (%).", "start_date": "Start.", "end_date": "End."})
 
 
 def _lab_and_proving(spark, catalog, schema, cfg, bb, start, end, rng):

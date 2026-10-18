@@ -1,4 +1,4 @@
-"""TwinV2 Silver — cleanse, conform, contextualize (Design Part 8.3 / Part 6).
+"""TwinV2 Silver: cleanse, conform, contextualize (Design Part 8.3 / Part 6).
 
 Silver is where the twin becomes intelligible: a raw tag becomes "Compressor CPF002-CMP-03 discharge
 pressure on Train 2". Telemetry is deduped, unit-normalized (bar->kPa), quality-filtered (flag kept),
@@ -132,6 +132,9 @@ sv_mc = _conform_txn("bronze_moc", "slv_moc", "SLV-04. Conformed OT-security / M
 sv_sp = _conform_txn("bronze_spares", "slv_spares", "SLV-04. Conformed spare-parts inventory (with BOM applicability).", join_asset=False)
 sv_ct = _conform_txn("bronze_contracts", "slv_commercial_contracts", "SLV-04. Conformed gas-sales contracts (delivery point = custody station).", join_asset=False)
 sv_dv = _conform_txn("bronze_dev_schedule", "slv_dev_schedule", "SLV-04. Conformed development / capex schedule.", join_asset=False)
+sv_sn = _conform_txn("bronze_supply_network", "slv_supply_network", "SLV-04. Conformed supply network (the physical gas path, reservoir to customer).", join_asset=False)
+sv_cu = _conform_txn("bronze_customers", "slv_customers", "SLV-04. Conformed customer book (delivery point + contract terms).", join_asset=False)
+sv_cd = _conform_txn("bronze_customer_deliveries", "slv_customer_deliveries", "SLV-04. Conformed daily customer deliveries (nominated vs delivered).", join_asset=False)
 
 
 # ===== SLV-05 document + geometry conform ====================================================

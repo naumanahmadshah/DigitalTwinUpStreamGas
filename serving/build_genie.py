@@ -1,4 +1,4 @@
-"""Phase 6 — build the Genie space over the curated GOLD marts (Design 3.2).
+"""Phase 6: build the Genie space over the curated GOLD marts (Design 3.2).
 
 Genie queries gold metric views only, never raw telemetry. Idempotent by title (create or patch).
 Guidance bakes in the unit convention (e3m3 -> 10^3 m^3), the advisory/no-autonomy framing, the spec
@@ -8,14 +8,16 @@ from __future__ import annotations
 import argparse, hashlib, json
 from databricks.sdk import WorkspaceClient
 
-TITLE = "Gas Upstream Digital Twin"
+TITLE = "Asset Intelligence Genie"
+OLD_TITLES = {"Gas Upstream Digital Twin"}   # earlier name: an existing space is renamed, not duplicated
 
 MARTS = ["gld_field_production", "gld_well_scorecard", "gld_compression_health", "gld_plant_kpi",
          "gld_flow_assurance", "gld_emissions_ledger", "gld_integrity_rbi", "gld_deferment",
          "gld_safety_alarms", "gld_custody_allocation", "gld_maintenance_reliability", "gld_economics",
          "gld_constraint_ranking", "gld_recommendations", "gld_asset_state",
          "gld_pred_liquid_loading", "gld_pred_rul",
-         "gld_lab_assay", "gld_commercial", "gld_weather"]
+         "gld_lab_assay", "gld_commercial", "gld_weather",
+         "gld_customer_supply", "gld_supply_network", "gld_supply_nodes"]
 
 QUESTIONS = [
     "Which five wells lost the most gas to deferment last month, and what was the coded cause and dollar impact?",
@@ -36,6 +38,7 @@ QUESTIONS = [
     "How have gas and carbon prices trended, and what is our nomination delivery versus contract?",
     "How do ambient temperature, wind and flood risk relate to our flaring and HSE exposure?",
     "What are the methane and NOx emissions by source this quarter for regulatory reporting?",
+    "Which customers are supplied through CPF Train 2, and how much gas and revenue per day does each take?",
 ]
 
 GUIDANCE = (
@@ -80,11 +83,11 @@ def main():
     if not wh:
         raise SystemExit("no SQL warehouse available")
 
-    body = {"title": TITLE, "description": "Natural-language analytics over the upstream gas twin v2 gold marts.",
+    body = {"title": TITLE, "description": "Natural-language analytics over the upstream gas field: production, wells, processing, reliability, emissions, commercial and customers (gold marts).",
             "warehouse_id": wh, "serialized_space": json.dumps(build(args.catalog, args.schema))}
     existing = None
     for s in (w.api_client.do("GET", "/api/2.0/genie/spaces").get("spaces") or []):
-        if s.get("title") == TITLE:
+        if s.get("title") == TITLE or s.get("title") in OLD_TITLES:
             existing = s.get("space_id") or s.get("id")
             break
     if existing:

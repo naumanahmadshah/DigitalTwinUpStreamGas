@@ -1,4 +1,4 @@
-"""TwinV2 Gold — business marts + ML proxies + Lakebase-serving marts (Design Part 7 / 8.4).
+"""TwinV2 Gold: business marts + ML proxies + Lakebase-serving marts (Design Part 7 / 8.4).
 
 MV-only: all logic lives here; the App and Genie issue plain SELECTs. Predictions are materialized as
 Gold so every surface reads one governed copy; recommendations are always advisory (the Part 4
@@ -501,3 +501,139 @@ def gld_recommendations():
                         F.lit("Cross-domain: open P1 WO + bearing spare 6 weeks out + only certified tech on leave 3 days + firmware change 2 days pre-anomaly + take-or-pay volume at risk.")).otherwise(F.lit("Derived from gold marts; advisory only."))))
     return reco.select("rec_id", "asset_id", "constraint_type", "recommendation", "production_at_risk_e3m3d",
                        "advisory_only", "hitl_status", "maturity_level", "evidence")
+
+
+# ===== GLD impact analysis: supply network + customers ========================================
+# Flows are the average gas day over the latest 30 gas days, so the Sankey, the customer list and the
+# impact PDF all describe the same recent operating state.
+STOP_ORDER = {"reservoir": 1, "wells": 2, "gathering": 3, "processing": 4, "compression": 5, "custody": 6, "customer": 7}
+
+
+def _last_days(df, n=30):
+    d = df.withColumn("_d", F.to_date("gas_day"))
+    mx = d.agg(F.max("_d").alias("mx"))
+    return d.crossJoin(mx).where(F.col("_d") > F.date_sub(F.col("mx"), n)).drop("mx")
+
+
+@dp.table(name="gld_customer_supply",
+          comment="Customer supply position (fictional buyers): contract terms (MDQ, annual quantity, price, take-or-pay, curtailment priority) with the latest-30-gas-day average delivered vs nominated energy, utilisation, revenue per day and 12-month volume. Join key: delivery_point (custody meter) + customer_id. Serves impact analysis + Genie.",
+          schema="""customer_id STRING COMMENT 'Customer id.',
+          customer_name STRING COMMENT 'Buyer (fictional).',
+          segment STRING COMMENT 'Customer segment (retail, power generation, industrial, LNG export, mining, distribution, spot market).',
+          location STRING COMMENT 'Where the customer takes the gas.',
+          delivery_point STRING COMMENT 'Custody meter the gas is delivered at.',
+          contract_id STRING COMMENT 'GSA / LNG SPA id.',
+          contract_type STRING COMMENT 'Firm GSA, LNG SPA, Interruptible or Spot.',
+          priority INT COMMENT 'Curtailment priority: 1 firm (curtailed last) .. 3 spot (curtailed first).',
+          mdq_tj DOUBLE COMMENT 'Maximum daily quantity (TJ/d).',
+          acq_pj DOUBLE COMMENT 'Annual contract quantity (PJ/yr).',
+          price_gj DOUBLE COMMENT 'Contract price (AUD/GJ); for spot buyers the average price received over the window.',
+          take_or_pay_pct INT COMMENT 'Take-or-pay floor (% of MDQ); 0 = none.',
+          contract_end STRING COMMENT 'Contract end date.',
+          delivered_tj_d DOUBLE COMMENT 'Average energy delivered per gas day, latest 30 days (TJ/d).',
+          nominated_tj_d DOUBLE COMMENT 'Average nomination per gas day, latest 30 days (TJ/d).',
+          delivered_e3m3_d DOUBLE COMMENT 'Average volume delivered per gas day, latest 30 days (10^3 m^3/d).',
+          utilisation_pct DOUBLE COMMENT 'Delivered as a share of MDQ (%).',
+          revenue_per_day DOUBLE COMMENT 'Average revenue per gas day, latest 30 days (AUD/d).',
+          delivered_pj_12m DOUBLE COMMENT 'Energy delivered over the latest 365 gas days (PJ).',
+          shortfall_days_30d INT COMMENT 'Gas days in the window delivered below nomination.'""")
+def gld_customer_supply():
+    c = spark.read.table("slv_customers")
+    dl = spark.read.table("slv_customer_deliveries")
+    w30 = _last_days(dl, 30).groupBy("customer_id").agg(
+        F.avg("delivered_tj").alias("delivered_tj_d"), F.avg("nominated_tj").alias("nominated_tj_d"),
+        F.avg("delivered_e3m3").alias("delivered_e3m3_d"), F.avg("revenue_dollars").alias("revenue_per_day"),
+        F.avg("price_gj").alias("px"),
+        F.sum(F.when(F.col("delivered_tj") < F.col("nominated_tj") - 0.5, 1).otherwise(0)).alias("short"))
+    y = _last_days(dl, 365).groupBy("customer_id").agg((F.sum("delivered_tj") / 1000.0).alias("pj12"))
+    o = c.join(w30, "customer_id", "left").join(y, "customer_id", "left")
+    return o.select(
+        "customer_id", "customer_name", "segment", "location", "delivery_point", "contract_id", "contract_type",
+        F.col("priority").cast("int").alias("priority"), F.round("mdq_tj", 1).alias("mdq_tj"), F.round("acq_pj", 2).alias("acq_pj"),
+        F.round(F.coalesce("price_gj", "px"), 2).alias("price_gj"), F.col("take_or_pay_pct").cast("int").alias("take_or_pay_pct"),
+        "contract_end", F.round("delivered_tj_d", 1).alias("delivered_tj_d"), F.round("nominated_tj_d", 1).alias("nominated_tj_d"),
+        F.round("delivered_e3m3_d", 0).alias("delivered_e3m3_d"),
+        F.round(F.col("delivered_tj_d") / F.col("mdq_tj") * 100, 1).alias("utilisation_pct"),
+        F.round("revenue_per_day", 0).alias("revenue_per_day"), F.round("pj12", 2).alias("delivered_pj_12m"),
+        F.coalesce(F.col("short"), F.lit(0)).cast("int").alias("shortfall_days_30d"))
+
+
+@dp.table(name="gld_supply_network",
+          comment="Supply network with flow: every link in the physical gas path (reservoir -> well pad -> gathering hub -> processing train -> compressor -> custody meter -> customer) with its average flow over the latest 30 gas days. Pad flows come from back-allocated production; meter-to-customer flows from custody deliveries. Serves the impact-analysis Sankey.",
+          schema="""from_id STRING COMMENT 'Upstream node id.',
+          from_name STRING COMMENT 'Upstream node name.',
+          from_stop STRING COMMENT 'Upstream value-chain stop.',
+          to_id STRING COMMENT 'Downstream node id.',
+          to_name STRING COMMENT 'Downstream node name.',
+          to_stop STRING COMMENT 'Downstream value-chain stop.',
+          basin STRING COMMENT 'Gas basin the link sits in.',
+          flow_e3m3d DOUBLE COMMENT 'Average gas flow on the link, latest 30 gas days (10^3 m^3/d).',
+          flow_tj_d DOUBLE COMMENT 'The same flow as energy (TJ/d, at 38 GJ per 10^3 m^3).'""")
+def gld_supply_network():
+    e = spark.read.table("slv_supply_network")
+    al = _last_days(spark.read.table("slv_allocation"), 30)
+    nd = al.select("_d").distinct().count() or 1
+    pad = al.groupBy("area_code").agg((F.sum("allocated_e3m3") / nd).alias("pf"))
+
+    def step(stop, inflow, key="from_id"):
+        return (e.where(F.col("from_stop") == stop).join(inflow, e[key] == inflow["nid"], "inner")
+                .withColumn("flow", F.col("nf") * F.coalesce(F.col("share"), F.lit(1.0))).drop("nid", "nf"))
+
+    padin = pad.select(F.col("area_code").alias("nid"), F.col("pf").alias("nf"))
+    res_pad = (e.where(F.col("from_stop") == "reservoir").join(padin, e["to_id"] == padin["nid"], "inner")
+               .withColumn("flow", F.col("nf")).drop("nid", "nf"))
+    pad_hub = step("wells", padin)
+    agg = lambda df: df.groupBy(F.col("to_id").alias("nid")).agg(F.sum("flow").alias("nf"))
+    hub_tr = step("gathering", agg(pad_hub))
+    tr_cmp = step("processing", agg(hub_tr))
+    cmp_met = step("compression", agg(tr_cmp))
+    # scale compressor->meter links so each meter's inflow equals what its customers received (processing shrink)
+    dl = _last_days(spark.read.table("slv_customer_deliveries"), 30)
+    ndd = dl.select("_d").distinct().count() or 1
+    cust = dl.groupBy("customer_id", "delivery_point").agg((F.sum("delivered_e3m3") / ndd).alias("cf"))
+    met_out = cust.groupBy("delivery_point").agg(F.sum("cf").alias("mo"))
+    met_in = cmp_met.groupBy("to_id").agg(F.sum("flow").alias("mi"))
+    k = met_in.join(met_out, met_in["to_id"] == met_out["delivery_point"]).select(F.col("to_id").alias("kid"), (F.col("mo") / F.col("mi")).alias("k"))
+    cmp_met = cmp_met.join(k, cmp_met["to_id"] == k["kid"], "left").withColumn("flow", F.col("flow") * F.coalesce(F.col("k"), F.lit(1.0))).drop("kid", "k")
+    met_cus = (e.where(F.col("from_stop") == "custody").join(cust, e["to_id"] == cust["customer_id"], "inner")
+               .withColumn("flow", F.col("cf")).drop("customer_id", "delivery_point", "cf"))
+    cols = ["from_id", "from_name", "from_stop", "to_id", "to_name", "to_stop", "basin", "flow"]
+    out = res_pad.select(*cols)
+    for part in (pad_hub, hub_tr, tr_cmp, cmp_met, met_cus):
+        out = out.unionByName(part.select(*cols))
+    return out.select(*cols[:-1], F.round("flow", 1).alias("flow_e3m3d"), F.round(F.col("flow") * GJ_PER_E3M3 / 1000.0, 2).alias("flow_tj_d"))
+
+
+@dp.table(name="gld_supply_nodes",
+          comment="Supply-network nodes: every stop in the gas path (reservoirs, well pads, gathering hubs, processing trains, compressors, custody meters, customers) with its column order, throughput and current health (worst asset state on the stop; customers amber when short of nomination). Serves the impact-analysis Sankey.",
+          schema="""node_id STRING COMMENT 'Node id (reservoir, area code, compressor asset id or customer id).',
+          node_name STRING COMMENT 'Node name.',
+          stop STRING COMMENT 'Value-chain stop: reservoir, wells, gathering, processing, compression, custody, customer.',
+          stop_order INT COMMENT 'Column order in the gas path (1 reservoir .. 7 customer).',
+          basin STRING COMMENT 'Gas basin.',
+          throughput_e3m3d DOUBLE COMMENT 'Gas through the node, latest 30 gas days (10^3 m^3/d): the larger of its inflow and outflow.',
+          throughput_tj_d DOUBLE COMMENT 'The same throughput as energy (TJ/d).',
+          status STRING COMMENT 'Health: red, amber or green.'""")
+def gld_supply_nodes():
+    n = spark.read.table("gld_supply_network")
+    outs = n.groupBy(F.col("from_id").alias("node_id")).agg(F.first("from_name").alias("nm_o"), F.first("from_stop").alias("st_o"),
+                                                             F.first("basin").alias("b_o"), F.sum("flow_e3m3d").alias("fo"))
+    ins = n.groupBy(F.col("to_id").alias("node_id")).agg(F.first("to_name").alias("nm_i"), F.first("to_stop").alias("st_i"),
+                                                          F.first("basin").alias("b_i"), F.sum("flow_e3m3d").alias("fi"))
+    nodes = outs.join(ins, "node_id", "full_outer")
+    st = spark.read.table("gld_asset_state")
+    worst = lambda df, key: df.groupBy(F.col(key).alias("sid")).agg(
+        F.when(F.max(F.col("pin_colour") == "red").cast("int") == 1, "red")
+         .when(F.max(F.col("pin_colour") == "amber").cast("int") == 1, "amber").otherwise("green").alias("s"))
+    area_s, asset_s = worst(st, "area_code"), worst(st, "asset_id")
+    cs = spark.read.table("gld_customer_supply").select(F.col("customer_id").alias("sid"),
+                                                        F.when(F.col("shortfall_days_30d") > 0, "amber").otherwise("green").alias("s"))
+    stat = area_s.unionByName(asset_s).unionByName(cs).groupBy("sid").agg(F.first("s").alias("s"))
+    om = F.create_map(*[x for kv in STOP_ORDER.items() for x in (F.lit(kv[0]), F.lit(kv[1]))])
+    o = (nodes.join(stat, nodes["node_id"] == stat["sid"], "left")
+         .withColumn("stop", F.coalesce("st_o", "st_i"))
+         .withColumn("tp", F.greatest(F.coalesce("fo", F.lit(0.0)), F.coalesce("fi", F.lit(0.0)))))
+    return o.select("node_id", F.coalesce("nm_o", "nm_i").alias("node_name"), "stop",
+                    om[F.col("stop")].cast("int").alias("stop_order"), F.coalesce("b_o", "b_i").alias("basin"),
+                    F.round("tp", 1).alias("throughput_e3m3d"), F.round(F.col("tp") * GJ_PER_E3M3 / 1000.0, 2).alias("throughput_tj_d"),
+                    F.coalesce(F.col("s"), F.lit("green")).alias("status"))

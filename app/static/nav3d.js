@@ -25,7 +25,7 @@ let tagBalls = [];
 const _camRight = new THREE.Vector3();
 // zoom level-of-detail: zooming out past a threshold reveals the facility (interior shell drops away),
 // and further out hands off to the map. Callbacks let the app switch to the Leaflet map.
-let onZoomOut = null, onStage = null, initRadius = 40, facilityStage = false, indoorShell = [];
+let onZoomOut = null, onStage = null, onEmpty = null, downX = 0, downY = 0, initRadius = 40, facilityStage = false, indoorShell = [];
 // zoom-out is hard-clamped at the facility view (maxRadius); a deliberate extra push past that stop
 // (overscroll ticks) is required to step up to the map.
 let maxRadius = 220, overscroll = 0;
@@ -628,7 +628,7 @@ function initRenderer() {
 function bindControls() {
   const el = renderer.domElement;
   el.style.cursor = "grab";
-  el.addEventListener("pointerdown", e => { drag = true; lx = e.clientX; ly = e.clientY; el.style.cursor = "grabbing"; });
+  el.addEventListener("pointerdown", e => { drag = true; lx = downX = e.clientX; ly = downY = e.clientY; el.style.cursor = "grabbing"; });
   window.addEventListener("pointerup", () => { drag = false; if (renderer) renderer.domElement.style.cursor = "grab"; });
   window.addEventListener("pointermove", e => {
     if (drag) { theta += (e.clientX - lx) * 0.006; phi -= (e.clientY - ly) * 0.006; lx = e.clientX; ly = e.clientY; updateCam(); }
@@ -648,6 +648,7 @@ function bindControls() {
     updateCam();
   }, { passive: false });
   el.addEventListener("pointermove", onHover);
+  el.addEventListener("pointerleave", () => { if (tipEl) tipEl.style.display = "none"; hovered = null; });
   el.addEventListener("click", onClick);
 }
 
@@ -690,8 +691,10 @@ function onHover(e) {
 }
 
 function onClick(e) {
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return;  // that was a drag-to-orbit, not a click
   const o = pickAt(e);
-  if (o && o.userData.asset && onPick) onPick(o.userData.asset.asset_id);
+  if (o && o.userData.asset) { if (onPick) onPick(o.userData.asset.asset_id); }
+  else if (onEmpty) onEmpty();   // clicked empty ground / sky / environment
 }
 
 function clearAssets() {
@@ -717,6 +720,7 @@ const Twin3D = {
     onPick = onPickCb;
     onZoomOut = (opts && opts.onZoomOut) || null;
     onStage = (opts && opts.onStage) || null;
+    onEmpty = (opts && opts.onEmpty) || null;
     if (!renderer) {
       initRenderer();
       container.appendChild(renderer.domElement);

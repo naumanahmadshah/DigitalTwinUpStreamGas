@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Gas Upstream Digital Twin — one-command deployment (Windows PowerShell).
+  Gas Upstream Digital Twin: one-command deployment (Windows PowerShell).
 
 .DESCRIPTION
   From a raw Windows computer with an internet connection and a Databricks workspace where you
@@ -27,7 +27,8 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Here
 . (Join-Path $Here 'lib\common.ps1')
 Set-Location $Root
-$GenieTitle = "Gas Upstream Digital Twin"   # must match TITLE in serving/build_genie.py
+$GenieTitle = "Asset Intelligence Genie"    # must match TITLE in serving/build_genie.py
+$DashName   = "Gas Upstream Digital Twin"   # must match NAME in serving/build_dashboard.py
 if ($WorkspaceUrl) { $m = [regex]::Match($WorkspaceUrl, '^(https?://[^/?]+)'); if ($m.Success) { $WorkspaceUrl = $m.Groups[1].Value } }
 
 Write-Host "== Gas Upstream Digital Twin - deploy ==" -ForegroundColor White
@@ -55,11 +56,11 @@ function Run-Sql([string]$Stmt) {
 }
 
 # ---- Phase 0: prerequisites + CLI -----------------------------------------------------------
-Step "Phase 0 - prerequisites"
+Step "Phase 0: prerequisites"
 Ensure-Cli
 
 # ---- Phase 1: authentication ----------------------------------------------------------------
-Step "Phase 1 - authentication"
+Step "Phase 1: authentication"
 # A workspace URL is the only required input. Prompt for it if not given, so a bare
 # `.\scripts\deploy.ps1` still works.
 if ((-not $WorkspaceUrl) -and (-not $Profile)) {
@@ -84,7 +85,7 @@ if ((Test-Path $StateMarker) -and $WsHost -and ((Get-Content $StateMarker -Raw -
 }
 
 # ---- Phase 2: SQL warehouse (used for DDL below + by the app) --------------------------------
-Step "Phase 2 - SQL warehouse"
+Step "Phase 2: SQL warehouse"
 if (-not $Warehouse) {
   $whs = Db-Json warehouses list -o json -p $Profile
   if ($whs) {
@@ -104,7 +105,7 @@ Ok "warehouse: $Warehouse"
 # ---- Phase 2b: catalog, schema, landing volume (via SQL - Default-Storage-safe) --------------
 # The landing volume must exist before data generation: batch_sources writes files into it, and
 # os.makedirs cannot create the UC volume object itself.
-Step "Phase 2 - catalog, schema and landing volume"
+Step "Phase 3: catalog, schema and landing volume"
 if (Run-Sql "CREATE CATALOG IF NOT EXISTS ``$Catalog``") { Ok "catalog '$Catalog' ready" }
 else { Die "Could not create catalog '$Catalog'. If your account uses Default Storage, create it once in the UI
       (Catalog > Create catalog, Default Storage) or pass -Catalog <existing>, then re-run." }
@@ -112,7 +113,7 @@ if (Run-Sql "CREATE SCHEMA IF NOT EXISTS ``$Catalog``.``$Schema``") { Ok "schema
 if (Run-Sql "CREATE VOLUME IF NOT EXISTS ``$Catalog``.``$Schema``.landing") { Ok "volume 'landing' ready" } else { Die "Could not create volume '$Catalog.$Schema.landing'." }
 
 # ---- Phase 3: Lakebase instance -------------------------------------------------------------
-Step "Phase 3 - Lakebase instance (write-back)"
+Step "Phase 4: Lakebase instance (write-back)"
 $inst = Db-Json api get "/api/2.0/database/instances/$DbInstance" -p $Profile
 $PgHost = if ($inst) { $inst.read_write_dns } else { "" }
 if (-not $PgHost) {
@@ -130,7 +131,7 @@ if (-not $PgHost) { Die "Lakebase instance '$DbInstance' did not become ready. L
 Ok "Lakebase host: $PgHost"
 
 # ---- Phase 4: render app.yaml + deploy bundle -----------------------------------------------
-Step "Phase 4 - deploy bundle (pipeline, jobs, app)"
+Step "Phase 5: deploy bundle (pipeline, jobs, app)"
 function Render-AppYaml([string]$GenieId) {
   (Get-Content (Join-Path $Root 'app\app.yaml.tmpl') -Raw).
     Replace('__CATALOG__',$Catalog).Replace('__SCHEMA__',$Schema).
@@ -155,20 +156,20 @@ if ($AppSp) {
 
 # ---- Phase 5: data generation ---------------------------------------------------------------
 if (-not $SkipData) {
-  Step "Phase 5 - generating data (longest step, ~10-20 min)"
+  Step "Phase 6: generating data (longest step, ~10-20 min)"
   & (Join-Path $Here 'generate_data.ps1') -Profile $Profile -Catalog $Catalog -Schema $Schema -Warehouse $Warehouse -DbInstance $DbInstance -AppName $AppName
   if ($LASTEXITCODE -ne 0) { Die "data generation failed" }
   Ok "data generated"
-} else { Warn "Phase 5 - skipping data generation (-SkipData)" }
+} else { Warn "Phase 6: skipping data generation (-SkipData)" }
 
 # ---- Phase 6: medallion ---------------------------------------------------------------------
-Step "Phase 6 - medallion pipeline (bronze -> silver -> gold)"
+Step "Phase 7: medallion pipeline (bronze -> silver -> gold)"
 BRun 'medallion' @('--full-refresh-all')
 if ($LASTEXITCODE -ne 0) { Die "medallion pipeline failed" }
 Ok "medallion complete"
 
 # ---- Phase 7: surfaces ----------------------------------------------------------------------
-Step "Phase 7 - Genie space + AI/BI dashboard"
+Step "Phase 8: Genie space + AI/BI dashboard"
 BRun 'surfaces' @()
 if ($LASTEXITCODE -eq 0) { Ok "surfaces built" } else { Warn "surfaces hit an issue; the app still works. See docs/TROUBLESHOOTING.md." }
 # A newly created Genie space can take a few seconds to appear in the spaces list, so poll for it.
@@ -181,22 +182,17 @@ for ($i = 0; $i -lt 12; $i++) {
   }
   Start-Sleep -Seconds 6
 }
-if ($GenieId) { Ok "Genie space: $GenieId" } else { Warn "Genie space id not found; the Field Copilot will show a 'not wired yet' note." }
+if ($GenieId) { Ok "Genie space: $GenieId" } else { Warn "Genie space id not found; the app's Genie lamp link will be hidden until a redeploy finds it." }
 
 # ---- Phase 8: start the app, wired to Genie -------------------------------------------------
-Step "Phase 8 - start the app"
+Step "Phase 9: start the app"
 Render-AppYaml $GenieId
 BDeploy
 BRun 'app' @()
 if ($LASTEXITCODE -ne 0) { Die "app failed to start" }
-if ($GenieId -and $AppSp) {
-  $pb = @{ access_control_list=@(@{ service_principal_name=$AppSp; permission_level='CAN_RUN' }) } | ConvertTo-Json -Compress -Depth 5
-  & databricks api patch "/api/2.0/permissions/genie/$GenieId" --json $pb -p $Profile *> $null
-  if ($LASTEXITCODE -eq 0) { Ok "app can query the Genie space" } else { Warn "could not grant the app CAN_RUN on Genie (set it in the UI if the Copilot errors)" }
-}
 
 # ---- Phase 9: Lakebase seed -----------------------------------------------------------------
-Step "Phase 9 - seed Lakebase (write-back table + grants)"
+Step "Phase 10: seed Lakebase (write-back table + grants)"
 BRun 'lakebase_seed' @()
 if ($LASTEXITCODE -eq 0) { Ok "Lakebase seeded" } else { Warn "Lakebase seed hit an issue; write-back may be read-only. See docs/TROUBLESHOOTING.md." }
 
@@ -210,8 +206,8 @@ Write-Host " Deployment complete." -ForegroundColor White
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ("  App:        " + ($(if ($AppUrl) { $AppUrl } else { "(open Compute > Apps > $AppName)" })))
 Write-Host ("  Catalog:    $Catalog.$Schema   (open Catalog to browse the marts)")
-if ($GenieId -and $WsHost) { Write-Host ("  Genie:      $WsHost/genie/rooms/$GenieId") }
-Write-Host ("  Dashboard:  open Dashboards > `"$GenieTitle`"")
+if ($GenieId -and $WsHost) { Write-Host ("  Genie:      $WsHost/one/agents/$GenieId") }
+Write-Host ("  Dashboard:  open Dashboards > `"$DashName`"")
 Write-Host ("  Warehouse:  $Warehouse")
 Write-Host ""
 Write-Host "  New here? Read docs/NAVIGATION.md for a guided tour of the app."

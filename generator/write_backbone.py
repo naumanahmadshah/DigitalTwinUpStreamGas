@@ -1,4 +1,4 @@
-"""Phase 1 driver — write the semantic backbone to Delta with table + column COMMENTs.
+"""Phase 1 driver: write the semantic backbone to Delta with table + column COMMENTs.
 
 Runs as a serverless spark_python_task. `__file__` is undefined under exec(), so we derive the
 generator dir from the --config path and import asset_model. Config is rendered to JSON by
@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse, os, sys
 from pyspark.sql import SparkSession, types as T
 
-# (table_comment, [(col, spark_type, comment), ...]) — the standing DDL convention: everything commented.
+# (table_comment, [(col, spark_type, comment), ...]): the standing DDL convention: everything commented.
 SCHEMAS = {
     "functional_location": (
         "ISO 14224 functional-location hierarchy (Site>Area>System>Asset). SCD2-ready reference spine of the twin (Design 6.1).",

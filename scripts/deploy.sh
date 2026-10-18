@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================================
-# Gas Upstream Digital Twin — one-command deployment (macOS / Linux).
+# Gas Upstream Digital Twin: one-command deployment (macOS / Linux).
 #
 # From a raw computer with an internet connection and a Databricks workspace where you have
 # workspace-admin rights, this script:
@@ -44,7 +44,8 @@ HOST=""
 WAREHOUSE_ID=""
 DB_INSTANCE="gas-upstream-twin-db"
 APP_NAME="gas-upstream-twin"
-GENIE_TITLE="Gas Upstream Digital Twin"   # must match TITLE in serving/build_genie.py
+GENIE_TITLE="Asset Intelligence Genie"    # must match TITLE in serving/build_genie.py
+DASH_NAME="Gas Upstream Digital Twin"       # must match NAME in serving/build_dashboard.py
 RUN_DATA=1
 
 usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0; }
@@ -62,7 +63,7 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 
 cd "$ROOT"
-printf "%s\n" "$C_B== Gas Upstream Digital Twin — deploy ==$C_0"
+printf "%s\n" "$C_B== Gas Upstream Digital Twin: deploy ==$C_0"
 info "catalog=$CATALOG  schema=$SCHEMA  app=$APP_NAME  db=$DB_INSTANCE"
 
 # VARS passed to every bundle command. Rebuilt after the warehouse is resolved.
@@ -91,12 +92,12 @@ run_sql() {
 }
 
 # ---- Phase 0: prerequisites + CLI -----------------------------------------------------------
-step "Phase 0 — prerequisites"
+step "Phase 0: prerequisites"
 ensure_python
 ensure_cli
 
 # ---- Phase 1: authentication ----------------------------------------------------------------
-step "Phase 1 — authentication"
+step "Phase 1: authentication"
 # A workspace URL is the only required input. Prompt for it if not given (interactive terminals),
 # so a bare `scripts/deploy.sh` still works.
 if [ -z "$HOST" ] && [ -z "$PROFILE" ] && [ -t 0 ]; then
@@ -117,27 +118,27 @@ WS_HOST="$HOST"
 # If the recorded host differs from this one, clear the stale state before deploying.
 STATE_MARKER=".databricks/.deploy_host"
 if [ -f "$STATE_MARKER" ] && [ -n "$WS_HOST" ] && [ "$(cat "$STATE_MARKER" 2>/dev/null)" != "$WS_HOST" ]; then
-  warn "workspace changed since the last local deploy — clearing stale bundle state (.databricks)"
+  warn "workspace changed since the last local deploy, clearing stale bundle state (.databricks)"
   rm -rf .databricks
 fi
 
 # ---- Phase 2: SQL warehouse (used for DDL below + by the app) --------------------------------
-step "Phase 2 — SQL warehouse"
+step "Phase 2: SQL warehouse"
 if [ -z "$WAREHOUSE_ID" ]; then
   WAREHOUSE_ID="$(databricks warehouses list -o json -p "$PROFILE" 2>/dev/null | pyjson 'next((w["id"] for w in d if w.get("state")=="RUNNING"), (d[0]["id"] if d else ""))' || true)"
 fi
 if [ -z "$WAREHOUSE_ID" ]; then
-  info "no warehouse found — creating a small serverless warehouse…"
+  info "no warehouse found, creating a small serverless warehouse…"
   WAREHOUSE_ID="$(databricks warehouses create --json '{"name":"Gas Twin Warehouse","cluster_size":"2X-Small","max_num_clusters":1,"auto_stop_mins":10,"enable_serverless_compute":true,"warehouse_type":"PRO"}' -o json -p "$PROFILE" 2>/dev/null | pyjson 'd.get("id","")' || true)"
   [ -n "$WAREHOUSE_ID" ] || die "Could not auto-create a SQL warehouse. Create one in the UI (SQL > SQL Warehouses) and pass --warehouse <id>."
 fi
 ok "warehouse: $WAREHOUSE_ID"
 build_vars
 
-# ---- Phase 2b: catalog, schema, landing volume (via SQL — Default-Storage-safe) --------------
+# ---- Phase 2b: catalog, schema, landing volume (via SQL: Default-Storage-safe) --------------
 # The landing volume must exist before data generation: batch_sources writes files into it, and
 # os.makedirs cannot create the UC volume object itself.
-step "Phase 2 — catalog, schema and landing volume"
+step "Phase 3: catalog, schema and landing volume"
 run_sql "CREATE CATALOG IF NOT EXISTS \`${CATALOG}\`" \
   || die "Could not create catalog '$CATALOG'. If your account uses Default Storage you may need to
       create it once in the UI (Catalog > Create catalog, Default Storage), or pass --catalog <existing>, then re-run."
@@ -148,7 +149,7 @@ run_sql "CREATE VOLUME IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`.landing" || di
 ok "volume 'landing' ready"
 
 # ---- Phase 2c: Lakebase instance (needed before the app binds to it) ------------------------
-step "Phase 3 — Lakebase instance (write-back)"
+step "Phase 4: Lakebase instance (write-back)"
 PGHOST="$(dbapi get "/api/2.0/database/instances/${DB_INSTANCE}" | pyjson 'd.get("read_write_dns","")')"
 if [ -z "$PGHOST" ]; then
   info "creating Lakebase instance '$DB_INSTANCE' (provisioning takes a few minutes)…"
@@ -166,7 +167,7 @@ fi
 ok "Lakebase host: $PGHOST"
 
 # ---- Phase 3: render app.yaml + deploy bundle -----------------------------------------------
-step "Phase 4 — deploy bundle (pipeline, jobs, app)"
+step "Phase 5: deploy bundle (pipeline, jobs, app)"
 render_app_yaml() {  # $1 = genie space id (may be empty on first pass)
   sed -e "s|__CATALOG__|${CATALOG}|g" -e "s|__SCHEMA__|${SCHEMA}|g" \
       -e "s|__DB_INSTANCE__|${DB_INSTANCE}|g" -e "s|__PGHOST__|${PGHOST}|g" \
@@ -191,21 +192,21 @@ fi
 
 # ---- Phase 4: data generation ---------------------------------------------------------------
 if [ "$RUN_DATA" -eq 1 ]; then
-  step "Phase 5 — generating data (this is the longest step, ~10-20 min)"
+  step "Phase 6: generating data (this is the longest step, ~10-20 min)"
   "$HERE/generate_data.sh" --profile "$PROFILE" --catalog "$CATALOG" --schema "$SCHEMA" \
       --warehouse "$WAREHOUSE_ID" --db-instance "$DB_INSTANCE" --app-name "$APP_NAME"
   ok "data generated"
 else
-  warn "Phase 5 — skipping data generation (--skip-data)"
+  warn "Phase 6: skipping data generation (--skip-data)"
 fi
 
 # ---- Phase 5: medallion ---------------------------------------------------------------------
-step "Phase 6 — medallion pipeline (bronze -> silver -> gold)"
+step "Phase 7: medallion pipeline (bronze -> silver -> gold)"
 brun medallion --full-refresh-all
 ok "medallion complete"
 
 # ---- Phase 6: surfaces (Genie + dashboard) --------------------------------------------------
-step "Phase 7 — Genie space + AI/BI dashboard"
+step "Phase 8: Genie space + AI/BI dashboard"
 if brun surfaces; then ok "surfaces built"; else warn "surfaces job hit an issue (Genie/dashboard). The app still works; see docs/TROUBLESHOOTING.md."; fi
 # A newly created Genie space can take a few seconds to appear in the spaces list, so poll for it.
 find_genie() { dbapi get /api/2.0/genie/spaces | python3 -c 'import sys,json
@@ -215,21 +216,16 @@ t=sys.argv[1]
 print(next((s.get("space_id") or s.get("id") for s in d.get("spaces",[]) if s.get("title")==t),""))' "$GENIE_TITLE" 2>/dev/null || true; }
 GENIE_ID=""
 for _ in $(seq 1 12); do GENIE_ID="$(find_genie)"; [ -n "$GENIE_ID" ] && break; sleep 6; done
-[ -n "$GENIE_ID" ] && ok "Genie space: $GENIE_ID" || warn "Genie space id not found; the Field Copilot will show a 'not wired yet' note."
+[ -n "$GENIE_ID" ] && ok "Genie space: $GENIE_ID" || warn "Genie space id not found; the app's Genie lamp link will be hidden until a redeploy finds it."
 
 # ---- Phase 7: start the app, wired to Genie -------------------------------------------------
-step "Phase 8 — start the app"
+step "Phase 9: start the app"
 render_app_yaml "$GENIE_ID"
 bdeploy
 brun app
-if [ -n "$GENIE_ID" ] && [ -n "$APP_SP" ]; then
-  databricks api patch "/api/2.0/permissions/genie/${GENIE_ID}" -p "$PROFILE" \
-    --json "{\"access_control_list\":[{\"service_principal_name\":\"${APP_SP}\",\"permission_level\":\"CAN_RUN\"}]}" >/dev/null 2>&1 \
-    && ok "app can query the Genie space" || warn "could not grant the app CAN_RUN on Genie (set it in the UI if the Copilot errors)"
-fi
 
 # ---- Phase 8: Lakebase seed -----------------------------------------------------------------
-step "Phase 9 — seed Lakebase (recommendation write-back table + grants)"
+step "Phase 10: seed Lakebase (recommendation write-back table + grants)"
 if brun lakebase_seed; then ok "Lakebase seeded"; else warn "Lakebase seed hit an issue; recommendation write-back may be read-only. See docs/TROUBLESHOOTING.md."; fi
 
 # ---- Phase 9: summary -----------------------------------------------------------------------
@@ -240,7 +236,7 @@ printf "%s Deployment complete.%s\n" "$C_B" "$C_0"
 printf "%s============================================================%s\n" "$C_G" "$C_0"
 printf "  App:        %s\n" "${APP_URL:-"(open Compute > Apps > ${APP_NAME})"}"
 printf "  Catalog:    %s.%s   (open Catalog to browse the marts)\n" "$CATALOG" "$SCHEMA"
-[ -n "$GENIE_ID" ] && [ -n "$WS_HOST" ] && printf "  Genie:      %s/genie/rooms/%s\n" "$WS_HOST" "$GENIE_ID"
-printf "  Dashboard:  open Dashboards > \"%s\"\n" "$GENIE_TITLE"
+[ -n "$GENIE_ID" ] && [ -n "$WS_HOST" ] && printf "  Genie:      %s/one/agents/%s\n" "$WS_HOST" "$GENIE_ID"
+printf "  Dashboard:  open Dashboards > \"%s\"\n" "$DASH_NAME"
 printf "  Warehouse:  %s\n" "$WAREHOUSE_ID"
 printf "\n  New here? Read docs/NAVIGATION.md for a guided tour of the app.\n\n"

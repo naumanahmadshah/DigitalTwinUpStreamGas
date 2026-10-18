@@ -3,7 +3,7 @@
 The generator's ONLY contract with the platform is where it lands. It writes two streaming
 landing Delta tables (`land_telemetry`, `land_events`) that Bronze's streaming jobs read, plus
 `src_*` CDC snapshot tables and files on the `landing` Volume (written by batch_sources.py).
-Nothing here writes Silver/Gold and nothing actuates — the read-only boundary of Part 5.
+Nothing here writes Silver/Gold and nothing actuates, the read-only boundary of Part 5.
 """
 from __future__ import annotations
 from pyspark.sql import types as T

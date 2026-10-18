@@ -1,4 +1,4 @@
-"""Layer 3 orchestration — scenarios, per-tick context, and the telemetry/event emitters.
+"""Layer 3 orchestration: scenarios, per-tick context, and the telemetry/event emitters.
 
 Because one field state (physics.py) drives every emitter, a single injected scenario propagates to
 every downstream signal, event, allocation line and dollar at once (Data-gen 9.7). This is what makes
@@ -81,7 +81,7 @@ class Scenarios:
         return mods
 
     def active_targets(self, t):
-        """(id, target, ramp) for scenarios active at t — used by batch_sources to reconcile marts."""
+        """(id, target, ramp) for scenarios active at t: used by batch_sources to reconcile marts."""
         out = []
         for it in self.items:
             f = self._ramp(it, t)

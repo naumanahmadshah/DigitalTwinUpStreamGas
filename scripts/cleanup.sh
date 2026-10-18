@@ -35,7 +35,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 CATALOG="gas_upstream_digital_twin"; SCHEMA="digital_twin"; PROFILE=""; HOST=""
 WAREHOUSE_ID=""; DB_INSTANCE="gas-upstream-twin-db"; APP_NAME="gas-upstream-twin"
-GENIE_TITLE="Gas Upstream Digital Twin"; DASH_NAME="Gas Upstream Digital Twin"
+GENIE_TITLE="Asset Intelligence Genie"; GENIE_OLD="Gas Upstream Digital Twin"; DASH_NAME="Gas Upstream Digital Twin"
 WH_NAME="Gas Twin Warehouse"   # the warehouse deploy.sh creates when a workspace has none
 ASSUME_YES=0
 
@@ -114,7 +114,7 @@ step "Removing the Genie space"
 GID="$(dbapi get /api/2.0/genie/spaces | python3 -c 'import sys,json
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
-print(next((s.get("space_id") or s.get("id") for s in d.get("spaces",[]) if s.get("title")==sys.argv[1]),""))' "$GENIE_TITLE" 2>/dev/null || true)"
+print(next((s.get("space_id") or s.get("id") for s in d.get("spaces",[]) if s.get("title") in sys.argv[1:]),""))' "$GENIE_TITLE" "$GENIE_OLD" 2>/dev/null || true)"
 if [ -n "$GID" ]; then
   databricks api delete "/api/2.0/genie/spaces/$GID" -p "$PROFILE" >/dev/null 2>&1 && ok "Genie space removed ($GID)" || warn "could not remove Genie space $GID"
 else ok "no Genie space to remove"; fi

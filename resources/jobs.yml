@@ -1,4 +1,4 @@
-# Jobs — data generation (the "setup" job) and the post-medallion surfaces + Lakebase seed.
+# Jobs: data generation (the "setup" job) and the post-medallion surfaces + Lakebase seed.
 # All run on serverless. Paths are relative to this file (resources/), hence ../generator, ../serving.
 # The --config argument points at the YAML synced to the workspace files path; the generator derives
 # its module directory from the config path's parent, so config/ and generator/ sit at the bundle root.

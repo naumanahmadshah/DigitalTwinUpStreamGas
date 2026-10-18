@@ -1,10 +1,29 @@
-/* Upstream Gas Digital Twin v2 — SPA. Vanilla JS; inline-SVG charts; Leaflet map; Three.js 3D. */
+/* Upstream Gas Digital Twin v2: SPA. Vanilla JS; inline-SVG charts; Leaflet map; Three.js 3D. */
 const $ = (s) => document.querySelector(s);
 const el = (h) => { const d = document.createElement("div"); d.innerHTML = h; return d.firstElementChild; };
-async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(u + " " + r.status); return r.json(); }
-async function postJSON(u, b) { const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }); return r.json(); }
+// Full-screen loader: any data fetch shows the animated loader over a blurred, darkened app.
+// Shown only if a load takes >150 ms (no flash on instant cached loads), and kept >=400 ms once shown.
+let _busy = 0, _ldShow = null, _ldAt = 0, _ldHide = null;
+function loaderStart() {
+  _busy++; clearTimeout(_ldHide);
+  if (_busy === 1 && !_ldShow) _ldShow = setTimeout(() => { _ldShow = null; if (_busy > 0) { _ldAt = Date.now(); $("#loader").classList.add("on"); } }, 150);
+}
+function loaderEnd() {
+  _busy = Math.max(0, _busy - 1); if (_busy) return;
+  if (_ldShow) { clearTimeout(_ldShow); _ldShow = null; }
+  const el = $("#loader"); if (!el || !el.classList.contains("on")) return;
+  _ldHide = setTimeout(() => { if (!_busy) el.classList.remove("on"); }, Math.max(0, 400 - (Date.now() - _ldAt)));
+}
+async function getJSON(u) {
+  loaderStart();
+  try { const r = await fetch(u); if (!r.ok) throw new Error(u + " " + r.status); return await r.json(); }
+  finally { loaderEnd(); }
+}
+async function postJSON(u, b) { loaderStart(); try { const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }); return await r.json(); } finally { loaderEnd(); } }
 const SERIES = ["#4b8fe6", "#7b6cf0", "#37b98a", "#e0a53a", "#e0533a"];
 const DEV = { red: "#e0533a", amber: "#e0a53a", green: "#37b98a" };
+// Bar-chart palette (deep teal -> mint -> cream). Status bars use the darker shades for worse values.
+const BARPAL = { deep: "#1e5068", teal: "#50949e", mint: "#96d3c4", pale: "#d6f2dc", cream: "#fffed8" };
 let NAV = [], CUR = null, _leaf = null;
 
 function fmt(v) {
@@ -24,11 +43,11 @@ const _MON = ["January", "February", "March", "April", "May", "June", "July", "A
 const _MONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtMD(s) { const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? (+m[3]) + " " + _MON[+m[2] - 1] : String(s); }
 function fmtMon(s) { const m = String(s).match(/^(\d{4})-(\d{2})/); return m ? _MONS[+m[2] - 1] + " " + m[1].slice(2) : String(s); }
-// Full human timestamp: "6 Oct 2026, 14:30" (date + time when present) — no ambiguous "06/10". (item 51)
+// Full human timestamp: "6 Oct 2026, 14:30" (date + time when present), no ambiguous "06/10". (item 51)
 function fmtWhen(s) { const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/); if (!m) return String(s); const d = (+m[3]) + " " + _MONS[+m[2] - 1] + " " + m[1]; return m[4] != null ? d + ", " + m[4] + ":" + m[5] : d; }
 // Humanise a coded/underscored display value (gas_lift -> Gas lift). Leaves ids/hyphenated codes alone.
 function humanVal(v) { return (typeof v === "string" && v.includes("_")) ? v.replace(/_/g, " ").replace(/^\w/, c => c.toUpperCase()) : v; }
-// Pretty-print a coded engineering unit for display — never show "e3m3" or raw tokens on the UI.
+// Pretty-print a coded engineering unit for display, never show "e3m3" or raw tokens on the UI.
 function prettyUnit(u) { if (u === null || u === undefined || u === "") return ""; const m = { "e3m3/d": "10³ m³/d", "e3m3": "10³ m³", "degC": "°C", "pctLEL": "% LEL", "molpct": "mol %", "pct": "%", "kmh": "km/h" }; return m[u] || u; }
 // Clean up any label/title/blurb so no caret unit ("10^3 m^3") or "e3m3" token reaches the UI.
 function prettyLabel(s) { return String(s == null ? "" : s).replace(/10\^3\s*m\^3/g, "10³ m³").replace(/m\^3/g, "m³").replace(/\be3m3d\b/g, "10³ m³/d").replace(/\be3m3\b/g, "10³ m³"); }
@@ -64,27 +83,63 @@ function svgLine(rows, xk, series, opts) {
   const legend = series.length > 1 ? `<div class="chart-legend">${series.map(s => `<span class="lg"><span class="lg-s" style="background:${s.color}"></span>${s.label || s.key}</span>`).join("")}</div>` : "";
   return `${legend}<svg viewBox="0 0 ${W} ${H}" class="chart">${grid}${zero}${xax}${paths}</svg>`;
 }
+// Bar charts are drawn at their card's real pixel width (not a stretched viewBox), so text is always the
+// same size and few-bar charts don't turn into slabs. svgBar returns a placeholder; drawBars() renders it
+// once it is in the page (a MutationObserver catches every insertion) and again on window resize.
+const BAR_REG = new Map(); let _barSeq = 0;
 function svgBar(rows, xk, yk, opts) {
   opts = opts || {}; const pts = rows.map(r => ({ x: String(r[xk]), y: Number(r[yk]) })).filter(p => p.y === p.y);
   if (!pts.length) return '<div class="muted">no data</div>';
-  const n = pts.length, pL = 48, pR = 12, pT = 12, pB = 84, BARW = 26, H = 268;
-  const minPlot = 680 - pL - pR, plotW = Math.max(minPlot, n * BARW), W = pL + pR + plotW, wide = plotW > minPlot + 1;
+  const id = "b" + (++_barSeq); BAR_REG.set(id, { pts, opts });
+  const dev = opts.color === "lowbad";
+  const key = dev ? `<div class="barkey"><i style="background:${BARPAL.deep}"></i>well below average <i style="background:${BARPAL.teal}"></i>below average <i style="background:${BARPAL.mint}"></i>at or above average</div>` : "";
+  return key + `<div class="barchart" data-bid="${id}"></div>`;
+}
+function drawBar(host) {
+  const spec = BAR_REG.get(host.getAttribute("data-bid")); if (!spec) return;
+  const avail = Math.floor(host.clientWidth); if (avail < 50) return;
+  if (host._w === avail) return; host._w = avail;
+  const { pts, opts } = spec, n = pts.length, pL = 46, pR = 10, pT = 12, plotH = 200;   // same plot height in every chart
+  const MIN_SLOT = 22, MAX_BAR = 56;
+  const fitSlot = (avail - pL - pR) / n, wide = fitSlot < MIN_SLOT;
+  const slot = wide ? MIN_SLOT : fitSlot, plotW = slot * n, W = pL + pR + plotW;
+  const longest = Math.min(18, Math.max(...pts.map(p => p.x.length)));
+  const rotate = slot < 70 || longest * 6.3 > slot - 6;   // tilt the labels whenever any would not fit flat
+  const short = s => { const lim = rotate ? 18 : Math.max(6, Math.floor(slot / 6.2)); return s.length > lim ? s.slice(0, lim - 1) + "…" : s; };
+  const pB = rotate ? 18 + longest * 4.6 : 30, H = Math.round(pT + plotH + pB), baseY = pT + plotH;
   const dataMax = Math.max(...pts.map(p => p.y), 0) || 1, step = niceNum(dataMax / 3, true), top = Math.ceil(dataMax / step) * step;
-  const plotH = H - pT - pB, baseY = pT + plotH, bw = plotW / n, yOf = v => pT + (1 - v / top) * plotH;
+  const yOf = v => pT + (1 - v / top) * plotH;
   const grid = []; for (let t = 0; t <= top + step * 1e-6; t += step) { const y = yOf(t).toFixed(1); grid.push(`<line x1="${pL}" y1="${y}" x2="${W - pR}" y2="${y}" class="gl"/><text x="${pL - 6}" y="${+y + 3}" class="ax" text-anchor="end">${fmtK(t)}</text>`); }
   const mean = pts.reduce((a, p) => a + p.y, 0) / n, dev = opts.color === "lowbad";
-  const fill = y => y < mean * 0.75 ? DEV.red : y < mean * 0.93 ? DEV.amber : DEV.green;
-  const bars = pts.map((p, i) => { const h = Math.max(1, (p.y / top) * plotH), x = pL + i * bw, y = baseY - h; return `<rect x="${(x + 1.5).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 3).toFixed(1)}" height="${h.toFixed(1)}" class="bar"${dev ? ` style="fill:${fill(p.y)}"` : ''}/>`; }).join("");
-  // keep labels ACCURATE (never rewrite CPF001->CPF1); just truncate the long ones, full text on hover
-  const short = s => { const x = String(s); return x.length > 18 ? x.slice(0, 17) + "…" : x; };
-  const ly = (baseY + 20).toFixed(1);
-  const labels = pts.map((p, i) => { const cx = (pL + i * bw + bw / 2).toFixed(1); return `<text x="${cx}" y="${ly}" class="axb" text-anchor="end" transform="rotate(-45 ${cx} ${ly})"><title>${escAttr(p.x)}</title>${short(p.x)}</text>`; }).join("");
-  const svg = `<svg viewBox="0 0 ${W} ${H}"${wide ? ` style="width:${W}px;max-width:none"` : ' class="chart"'}>${grid.join("")}<line x1="${pL}" y1="${baseY}" x2="${W - pR}" y2="${baseY}" class="gl"/>${bars}${labels}</svg>`;
-  return wide ? `<div style="overflow-x:auto;max-width:100%">${svg}</div>` : svg;
+  const fill = y => y < mean * 0.75 ? BARPAL.deep : y < mean * 0.93 ? BARPAL.teal : BARPAL.mint;
+  const bwid = Math.max(1, Math.min(MAX_BAR, slot - 4));
+  const bars = pts.map((p, i) => { const h = Math.max(1, (p.y / top) * plotH), x = pL + i * slot + (slot - bwid) / 2;
+    return `<rect x="${x.toFixed(1)}" y="${(baseY - h).toFixed(1)}" width="${bwid.toFixed(1)}" height="${h.toFixed(1)}" class="bar"${dev ? ` style="fill:${fill(p.y)}"` : ""}><title>${escAttr(p.x)}: ${fmt(p.y)}</title></rect>`; }).join("");
+  const ly = baseY + (rotate ? 14 : 17);
+  const labels = pts.map((p, i) => { const cx = (pL + i * slot + slot / 2).toFixed(1);
+    return rotate ? `<text x="${cx}" y="${ly}" class="axb" text-anchor="end" transform="rotate(-45 ${cx} ${ly})"><title>${escAttr(p.x)}</title>${short(p.x)}</text>`
+                  : `<text x="${cx}" y="${ly}" class="axb" text-anchor="middle"><title>${escAttr(p.x)}</title>${short(p.x)}</text>`; }).join("");
+  const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="barsvg">${grid.join("")}<line x1="${pL}" y1="${baseY}" x2="${W - pR}" y2="${baseY}" class="gl"/>${bars}${labels}</svg>`;
+  host.innerHTML = wide ? `<div class="barscroll">${svg}</div>` : svg;
 }
+function drawBars(root) { (root || document).querySelectorAll(".barchart").forEach(drawBar); }
+new MutationObserver(() => drawBars()).observe(document.documentElement, { childList: true, subtree: true });
+window.addEventListener("resize", () => drawBars());
 
 /* ---------- shared render helpers ---------- */
 const escAttr = (s) => String(s).replace(/"/g, "&quot;").replace(/</g, "&lt;");
+// Every work-order id in the app is a link to its detail (handled by the global click handler).
+const woLink = id => `<a href="#" class="cell-link wolink" data-wo-id="${escAttr(id)}">${id}</a>`;
+const linkWOs = html => String(html).replace(/\bWO-\d{4,}\b/g, m => woLink(m));
+// Recommendation evidence says "open P1 WO": point it at the asset's actual open work order(s).
+function evidenceWithWOs(text, wos) {
+  const open = (wos || []).filter(w => !w.status || ["open", "in_progress"].includes(w.status));
+  const p1 = open.find(w => w.priority === "P1") || open[0];
+  let t = linkWOs(text || "");
+  if (p1) t = t.replace(/open P1 WO/, `open ${p1.priority || "P1"} work order ${woLink(p1.wo_id)}`);
+  else t = t.replace(/open P1 WO \+ /, "");   // the stock evidence claims an open WO; drop it when the asset has none
+  return t;
+}
 function infoI(text) { return `<span class="infoi" title="${escAttr(text)}">i</span>`; }
 // Resolve a short explanation for a metric from its label (keyword match), with a sensible default.
 function kpiDesc(label) {
@@ -204,7 +259,8 @@ function tableHTML(cols, rows, opts) {
     return tr + cols.map(c => {
       const k = key(c), v = r[k];
       const assetCell = (entity === "workorder" && k === "asset_id" && v != null && v !== "") ? ` data-asset-id="${escAttr(v)}"` : "";
-      return `<td class="${isNum(k) ? "num" : ""}${assetCell ? " cell-link" : ""}"${assetCell} data-v="${escAttr(sv(k, v))}">${cell(k, v)}</td>`;
+      const body = (k === "wo_id" && v != null && v !== "") ? woLink(v) : cell(k, v);
+      return `<td class="${isNum(k) ? "num" : ""}${assetCell ? " cell-link" : ""}"${assetCell} data-v="${escAttr(sv(k, v))}">${body}</td>`;
     }).join("") + "</tr>";
   }).join("");
   return `<div style="overflow:auto;max-height:520px"><table id="${tid}" class="dtbl"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
@@ -241,7 +297,7 @@ function valueChainMods() { return (NAV || []).filter(n => n.group === "Value ch
 function crossMods() { return (NAV || []).filter(n => n.group === "Cross-cutting"); }
 let GFC_CUR = null, GFC_CROSS = null, PENDING_SCENE = null;
 // navigate to any module; value-chain stops open inside the Gas-flow-chain tab bar, and cross-cutting
-// reports open inside its "Cross Landscape Reports" sub-tabs (item 28).
+// reports open inside its "Analytics" sub-tabs (item 28).
 function goTo(key) {
   if (valueChainMods().some(m => m.key === key)) { GFC_CUR = key; select("gas_flow_chain"); }
   else if (crossMods().some(m => m.key === key)) { GFC_CROSS = key; select("cross_landscape"); }
@@ -259,13 +315,20 @@ function sparkline(points, color) {
   return `<svg viewBox="0 0 ${W} ${H}" class="spark" preserveAspectRatio="none"><path d="${d}" style="fill:none;stroke:${color || '#2f7dc4'};stroke-width:1.6"/></svg>`;
 }
 // enlarge a telemetry series into a full chart with the rest of the UI dimmed; ✕ or Esc closes it
+// One shared modal for enlarged charts and site weather history. Its body scrolls on its own; the
+// page behind never scrolls while it is open (wheel/touch outside the body is swallowed).
+function chartModal() {
+  let m = $("#chartmodal"); if (m) return m;
+  m = el(`<div id="chartmodal"><div class="cm-box"><div class="cm-head"><span class="cm-t"></span><button class="cm-x" title="Close">✕</button></div><div class="cm-body"></div></div></div>`);
+  document.body.appendChild(m);
+  m.addEventListener("click", e => { if (e.target === m || e.target.closest(".cm-x")) m.classList.remove("open"); });
+  const block = e => { const b = e.target.closest(".cm-body"); if (!b || b.scrollHeight <= b.clientHeight) e.preventDefault(); };
+  m.addEventListener("wheel", block, { passive: false }); m.addEventListener("touchmove", block, { passive: false });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") m.classList.remove("open"); });
+  return m;
+}
 function openChartModal(title, points, unit) {
-  let m = $("#chartmodal");
-  if (!m) {
-    m = el(`<div id="chartmodal"><div class="cm-box"><div class="cm-head"><span class="cm-t"></span><button class="cm-x" title="Close">✕</button></div><div class="cm-body"></div></div></div>`);
-    document.body.appendChild(m);
-    m.addEventListener("click", e => { if (e.target === m || e.target.closest(".cm-x")) m.classList.remove("open"); });
-  }
+  const m = chartModal();
   m.querySelector(".cm-t").textContent = title + (unit ? ` (${unit})` : "");
   m.querySelector(".cm-body").innerHTML = svgLine(points, "gas_day", [{ key: "value", label: title }]);
   m.classList.add("open");
@@ -288,11 +351,21 @@ async function openAssetDrawer(id, sceneId) {
   ensureDrawer();
   const wrap = $("#drawerwrap"), dr = $("#assetdrawer");
   wrap.classList.add("open"); dr.classList.remove("wide");
-  dr.innerHTML = `<div class="dr-head"><span class="dr-title">Loading ${id}…</span><button class="dr-x" title="Close">✕</button></div>`;
-  dr.querySelector(".dr-x").onclick = closeDrawer;
+  renderAssetDetail(dr, id, { sceneId, onClose: closeDrawer });
+}
+
+// The rich asset detail (state, recommendation, telemetry sparklines, work orders, notifications,
+// failures, procurement, lab, deferment, live tags). Shared by the asset drawer and the 3D view's
+// side panel so both always show the same thing. opts.in3d hides the "View site" button.
+async function renderAssetDetail(root, id, opts) {
+  opts = opts || {};
+  const close = opts.onClose || (() => {});
+  root.innerHTML = `<div class="dr-head"><span class="dr-title">Loading ${id}…</span><button class="dr-x" title="Close">✕</button></div>`;
+  root.querySelector(".dr-x").onclick = close;
   let d, s, ctx = {};
   try { [d, s, ctx] = await Promise.all([getJSON("/api/asset/" + encodeURIComponent(id)), getJSON("/api/asset_series/" + encodeURIComponent(id)), getJSON("/api/asset_context/" + encodeURIComponent(id))]); }
-  catch (e) { const t = dr.querySelector(".dr-title"); if (t) t.textContent = id + " — unavailable"; return; }
+  catch (e) { const t = root.querySelector(".dr-title"); if (t) t.textContent = id + " (unavailable)"; return; }
+  if (root.getAttribute("data-asset") && root.getAttribute("data-asset") !== id) return;  // a newer click won
   const st = d.state || {}, name = st.asset_id || id, reco = (d.recommendations || [])[0], sers = s.series || [];
   const kv = (k, val) => `<div class="kv"><span>${k}</span><span>${val}</span></div>`;
   const sparks = sers.length
@@ -301,7 +374,7 @@ async function openAssetDrawer(id, sceneId) {
   const tagRows = (d.tags || []).slice(0, 20);
   const defers = (d.deferment || []).slice(0, 8);
   const wos = (d.workorders || []).slice(0, 12);
-  dr.innerHTML = `<div class="dr-head"><span class="dr-title">${name} ${pill(st.pin_colour)}</span><button class="dr-x" title="Close">✕</button></div>
+  root.innerHTML = `<div class="dr-head"><span class="dr-title">${name} ${pill(st.pin_colour)}</span><span class="dr-acts">${opts.in3d ? "" : `<button class="btn dr-site" id="dr3d">View site</button>`}<button class="dr-x" title="Close">✕</button></span></div>
     <div class="dr-scroll">
       ${kv("Type", humanVal(st.equipment_type || "–"))}
       ${kv("Area", `<a href="#" class="drlink" data-area="${escAttr(st.area_code || "")}">${st.area_code || "–"}</a>`)}
@@ -310,36 +383,35 @@ async function openAssetDrawer(id, sceneId) {
       ${kv("Health score", fmt(st.health_score))}
       ${kv("Production at risk", fmt(st.production_at_risk_e3m3d) + " ×10³m³/d")}
       ${kv("Open work orders", fmt(st.open_wos))}
-      ${reco ? `<div class="banner" style="margin:10px 0">${reco.recommendation}${reco.evidence ? `<div class="ev">${reco.evidence}</div>` : ""}</div>` : ""}
+      ${reco ? `<div class="banner" style="margin:10px 0">${reco.recommendation}${reco.evidence ? `<div class="ev">${evidenceWithWOs(reco.evidence, d.workorders)}</div>` : ""}</div>` : ""}
       ${sparks}
-      ${wos.length ? `<div class="dr-sec">Work orders for this asset</div><table class="dtbl"><tbody>${wos.map(w => `<tr><td>${w.wo_id}</td><td>${humanVal(w.wo_type)} ${pill(w.priority)}</td><td>${humanVal(w.status)}</td></tr>`).join("")}</tbody></table>` : ""}
+      ${wos.length ? `<div class="dr-sec">Work orders for this asset</div><table class="dtbl"><tbody>${wos.map(w => `<tr class="worow" data-wo-id="${escAttr(w.wo_id)}" data-back="${escAttr(name)}"><td>${woLink(w.wo_id)}</td><td>${humanVal(w.wo_type)} ${pill(w.priority)}</td><td>${humanVal(w.status)}</td></tr>`).join("")}</tbody></table>` : ""}
       ${(ctx.notifications || []).length ? `<div class="dr-sec">Notifications</div><table class="dtbl"><tbody>${ctx.notifications.map(n => `<tr><td>${n.notif_id}</td><td>${humanVal(n.notif_type)} ${pill(n.priority)}</td><td>${humanVal(n.status)}</td></tr>`).join("")}</tbody></table>` : ""}
       ${(ctx.failures || []).length ? `<div class="dr-sec">Failure history (ISO 14224)</div><table class="dtbl"><tbody>${ctx.failures.map(f => `<tr><td>${fmtMD(f.failure_date)}</td><td>${f.iso14224_code} · ${humanVal(f.failure_mode)}</td><td class="num">${fmt(f.downtime_hours)} h</td></tr>`).join("")}</tbody></table>` : ""}
-      ${(ctx.spares || []).length ? `<div class="dr-sec">Procurement — what to order</div><table class="dtbl"><tbody>${ctx.spares.map(sp => `<tr><td>${humanVal(sp.procurement_type)}</td><td>${humanVal(sp.part_name)}</td><td class="num">lead ${fmt(sp.lead_time_days)}d · ${fmt(sp.unit_cost)} · ${pill(sp.exposure)}</td></tr>`).join("")}</tbody></table>` : ""}
+      ${(ctx.spares || []).length ? `<div class="dr-sec">Procurement: what to order</div><table class="dtbl"><tbody>${ctx.spares.map(sp => `<tr><td>${humanVal(sp.procurement_type)}</td><td>${humanVal(sp.part_name)}</td><td class="num">lead ${fmt(sp.lead_time_days)}d · ${fmt(sp.unit_cost)} · ${pill(sp.exposure)}</td></tr>`).join("")}</tbody></table>` : ""}
       ${(ctx.lab || []).length ? `<div class="dr-sec">Lab assays</div><table class="dtbl"><tbody>${ctx.lab.map(l => `<tr><td>${fmtMD(l.sample_date)}</td><td>${humanVal(l.sample_point)}</td><td class="num">C₁ ${fmt(l.c1_molpct)} · CO₂ ${fmt(l.co2_molpct)} · H₂S ${fmt(l.h2s_ppm)}</td></tr>`).join("")}</tbody></table>` : ""}
       ${defers.length ? `<div class="dr-sec">Deferment timeline</div><table class="dtbl"><tbody>${defers.map(x => `<tr><td>${fmtMD(x.gas_day)}</td><td>${humanVal(x.cause_desc)}</td><td class="num">${fmt(x.deferred_dollars)}</td></tr>`).join("")}</tbody></table>` : ""}
-      ${tagRows.length ? `<div class="dr-sec">Live tags</div><table class="dtbl"><tbody>${tagRows.map(t => `<tr><td>${humanVal(t.signal)}</td><td class="num">${fmt(t.latest_value)} ${prettyUnit(t.unit)}</td></tr>`).join("")}</tbody></table>` : ""}
-      <div style="margin-top:14px"><button class="btn" id="dr3d">View in 3D</button></div>
+      ${tagRows.length ? `<div class="dr-sec">Live tags</div><table class="dtbl"><tbody>${tagRows.map(t => `<tr><td>${humanVal(t.signal)}</td><td class="num">${fmt(t.latest_value)} ${prettyUnit(t.unit)}</td><td>${pill(t.latest_quality === "good" ? "green" : "amber")}</td></tr>`).join("")}</tbody></table>` : ""}
     </div>`;
-  dr.querySelector(".dr-x").onclick = closeDrawer;
-  dr.querySelectorAll(".sparkcard").forEach(c => c.onclick = () => { const se = sers[+c.getAttribute("data-si")]; openChartModal(humanVal(se.signal), se.points, se.unit); });
-  // click the asset's area to jump to the Work Orders tab (its work orders in context) — item 26
-  const al = dr.querySelector(".drlink[data-area]"); if (al) al.onclick = (e) => { e.preventDefault(); closeDrawer(); goTo("maintenance"); };
-  const b3d = dr.querySelector("#dr3d"); if (b3d) b3d.onclick = () => { PENDING_SCENE = sceneId || st.scene_id || null; closeDrawer(); select("navigator"); };
+  root.querySelector(".dr-x").onclick = close;
+  root.querySelectorAll(".sparkcard").forEach(c => c.onclick = () => { const se = sers[+c.getAttribute("data-si")]; openChartModal(humanVal(se.signal), se.points, se.unit); });
+  // click the asset's area to jump to its work orders in context (item 26)
+  const al = root.querySelector(".drlink[data-area]"); if (al) al.onclick = (e) => { e.preventDefault(); close(); goTo("maintenance"); };
+  const b3d = root.querySelector("#dr3d"); if (b3d) b3d.onclick = () => { PENDING_SCENE = opts.sceneId || st.scene_id || null; close(); select("navigator"); };
 }
 
 // Work-order detail (item 29): the WO itself, with a link to its asset and a notifications sublink.
-async function openWoDrawer(woId) {
+async function openWoDrawer(woId, backAsset) {
   if (!woId) return;
   ensureDrawer();
   const wrap = $("#drawerwrap"), dr = $("#assetdrawer");
   wrap.classList.add("open"); dr.classList.remove("wide");
   dr.innerHTML = `<div class="dr-head"><span class="dr-title">Loading ${woId}…</span><button class="dr-x" title="Close">✕</button></div>`;
   dr.querySelector(".dr-x").onclick = closeDrawer;
-  let d; try { d = await getJSON("/api/workorder/" + encodeURIComponent(woId)); } catch (e) { const t = dr.querySelector(".dr-title"); if (t) t.textContent = woId + " — unavailable"; return; }
+  let d; try { d = await getJSON("/api/workorder/" + encodeURIComponent(woId)); } catch (e) { const t = dr.querySelector(".dr-title"); if (t) t.textContent = woId + ", unavailable"; return; }
   const w = d.wo || {}, notifs = d.notifications || [];
   const kv = (k, val) => `<div class="kv"><span>${k}</span><span>${val}</span></div>`;
-  dr.innerHTML = `<div class="dr-head"><span class="dr-title">${w.wo_id || woId} ${pill(w.priority)}</span><button class="dr-x" title="Close">✕</button></div>
+  dr.innerHTML = `<div class="dr-head"><span class="dr-title">${backAsset ? `<a href="#" class="drlink dr-back" title="Back to ${escAttr(backAsset)}">‹</a> ` : ""}${w.wo_id || woId} ${pill(w.priority)}</span><button class="dr-x" title="Close">✕</button></div>
     <div class="dr-scroll">
       ${kv("Type", humanVal(w.wo_type || "–"))}
       ${kv("Status", humanVal(w.status || "–"))}
@@ -353,6 +425,7 @@ async function openWoDrawer(woId) {
     </div>`;
   dr.querySelector(".dr-x").onclick = closeDrawer;
   const al = dr.querySelector(".drlink[data-asset-id]"); if (al) al.onclick = (e) => { e.preventDefault(); openAssetDrawer(al.getAttribute("data-asset-id")); };
+  const bk = dr.querySelector(".dr-back"); if (bk) bk.onclick = (e) => { e.preventDefault(); openAssetDrawer(backAsset); };
 }
 // Full notification / failure lists, opened from the KPI tiles (item 29). Rows link to their asset.
 async function openListDrawer(kind) {
@@ -386,27 +459,28 @@ function ccSpine(cons, bindingTop) {
     const state = isBind ? "bind" : (isNext ? "watch" : "ok");
     const sub = isBind ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : (isNext ? "next" : "nominal");
     return `<div class="cc2-stop ccgo ${state}" data-goto="${stopGoto[s]}">
-        <span class="cc2-node"></span>
+        <img class="cc2-stop-img" src="img/stop_${s.toLowerCase()}.png" alt="${s}">
         <span class="cc2-stop-name">${s}</span>
         <span class="cc2-stop-sub">${sub}</span>
       </div>${i < stops.length - 1 ? '<span class="cc2-pipe"></span>' : ""}`;
   }).join("")}</div>`;
 }
 
-function ccArea(rows) {
+function ccArea(rows, W, H) {
   rows = rows || []; const n = rows.length; if (!n) return '<div class="muted">no data</div>';
   const num = v => Number(v);
   let mn = Infinity, mx = -Infinity;
   rows.forEach(r => [num(r.actual_e3m3), num(r.nominated_e3m3)].forEach(x => { if (x === x) { mn = Math.min(mn, x); mx = Math.max(mx, x); } }));
   if (!(mn <= mx)) return '<div class="muted">no data</div>';
   const step = niceNum(((mx - mn) || 1) / 3, true); mn = Math.floor(mn / step) * step; mx = Math.ceil(mx / step) * step;
-  const W = 1000, H = 236, pL = 96, pR = 30, pT = 16, pB = 40;
+  W = Math.max(W || 1000, 320); H = Math.max(H || 236, 160);
+  const pL = 52, pR = 16, pT = 10, pB = 30;
   const sx = i => pL + (n <= 1 ? 0 : i * (W - pL - pR) / (n - 1));
   const sy = v => pT + (mx - v) * (H - pT - pB) / (mx - mn);
   const ticks = []; for (let t = mn; t <= mx + step * 1e-6; t += step) ticks.push(t);
   const grid = ticks.map(t => `<line x1="${pL}" y1="${sy(t).toFixed(1)}" x2="${W - pR}" y2="${sy(t).toFixed(1)}" class="gl"/><text x="${pL - 6}" y="${(sy(t) + 3).toFixed(1)}" class="ax" text-anchor="end">${fmtK(t)}</text>`).join("");
   const xs = rows.map(r => r.gas_day); const xi = [0, Math.floor((n - 1) / 3), Math.floor(2 * (n - 1) / 3), n - 1];
-  const ly = H - pB + 24;  // horizontal labels in the bottom margin; edge labels anchored in so nothing clips
+  const ly = H - pB + 22;  // horizontal labels in the bottom margin; edge labels anchored in so nothing clips
   const xax = xi.map((i, k) => { const cx = sx(i).toFixed(1); const anchor = k === 0 ? "start" : (k === xi.length - 1 ? "end" : "middle"); return `<text x="${cx}" y="${ly}" class="axb" text-anchor="${anchor}">${fmtMD(xs[i])}</text>`; }).join("");
   // shortfall band: fill between nominated (top) and actual (bottom) where actual < nominated
   const seg = [];
@@ -418,14 +492,15 @@ function ccArea(rows) {
     band = `<polygon points="${topPts.concat(botPts).join(" ")}" fill="#DD4B1A" opacity="0.14"/>`;
   }
   const line = (key, cls, dash) => { const pts = rows.map((r, i) => ({ i, y: num(r[key]) })).filter(p => p.y === p.y); const dd = pts.map((p, k) => (k ? "L" : "M") + sx(p.i).toFixed(1) + " " + sy(p.y).toFixed(1)).join(" "); return `<path d="${dd}" class="${cls}"${dash ? ' stroke-dasharray="6 5"' : ""}/>`; };
-  return `<svg viewBox="0 0 ${W} ${H}" class="cc2-chartsvg">${grid}${band}${line("nominated_e3m3", "cc2-ln-nom", true)}${line("actual_e3m3", "cc2-ln-act")}${xax}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="cc2-chartsvg">${grid}${band}${line("nominated_e3m3", "cc2-ln-nom", true)}${line("actual_e3m3", "cc2-ln-act")}${xax}</svg>`;
 }
 
 async function renderCommand() {
   const v = $("#view"); v.innerHTML = '<div class="placeholder">Loading Command Centre…</div>';
   let d, cons;
   try { d = await getJSON("/api/overview"); cons = await getJSON("/api/constraints"); }
-  catch (e) { v.innerHTML = `<div class="placeholder">Command Centre unavailable. ${e}</div>`; return; }
+  catch (e) { if (CUR === "command_centre") v.innerHTML = `<div class="placeholder">Command Centre unavailable. ${e}</div>`; return; }
+  if (CUR !== "command_centre") return;   // the user moved on while this was loading; don't overwrite their screen
   const kv = _kv(d.kpis), series = d.series || [], top = (cons && cons[0]) || null;
   const rate = Number(kv["Production (10^3 m^3/d)"]) || 0;
   const gap = Number(kv["Gap to nomination"]) || 0;
@@ -438,8 +513,6 @@ async function renderCommand() {
     ["Work orders", fmt(kv["Open work orders"]), "open", "Open maintenance work orders across the field (EAM).", "maintenance"],
   ];
   v.innerHTML = `<div class="cc2">
-    <div class="cc2-head"><h1>Command Centre</h1></div>
-
     <div class="cc2-hero">
       <div class="cc2-rate ccgo" data-goto="reservoir_wells">
         <div class="cc2-rate-val">${fmt(rate)}</div>
@@ -453,18 +526,26 @@ async function renderCommand() {
         <div class="cc2-cx-lab">The bottleneck ${infoI("The single asset putting the most production at risk right now, from the ranked field constraints.")}</div>
         <div class="cc2-cx-asset">${top.asset_id}</div>
         <div class="cc2-cx-meta">${top.constraint_type}, ${fmt(top.production_at_risk_e3m3d)} ×10³m³/d at risk</div>
-      </div>` : ""}
+      </div>` : "<div></div>"}
+      <a class="cc2-maplink" href="#" title="Open the Field Map" aria-label="Open the Field Map"><img src="img/fieldmap.png" alt=""><span>Field Map</span></a>
+      <a class="cc2-maplink cc2-impactlink" href="#" title="Trace what each stop feeds, down to the customers" aria-label="Impact analysis">${IMPACT_ICON}<span>Impact analysis</span></a>
     </div>
 
     ${ccSpine(cons, top)}
 
-    <div class="cc2-panel" style="margin-top:16px">
+    <div class="cc2-panel cc2-chartpanel">
       <div class="cc2-h"><span>Production against commitment</span><span class="cc2-key"><i class="k-act"></i>actual <i class="k-nom"></i>nominated <i class="k-short"></i>shortfall</span></div>
-      ${ccArea(series.slice(-62))}
+      <div class="cc2-chartbox"></div>
     </div>
 
     <div class="cc2-ledger">${led.map(x => `<div class="cc2-led ccgo" data-goto="${x[4]}"><div class="cc2-led-v">${x[1]}</div><div class="cc2-led-n">${x[0]} ${infoI(x[3])}</div><div class="cc2-led-s">${x[2]}</div></div>`).join("")}</div>
   </div>`;
+  v.querySelector(".cc2-maplink").onclick = e => { e.preventDefault(); e.stopPropagation(); select("map"); };
+  v.querySelector(".cc2-impactlink").onclick = e => { e.preventDefault(); e.stopPropagation(); select("impact"); };
+  const rows = series.slice(-62), box = v.querySelector(".cc2-chartbox");
+  const draw = () => { if (!box.isConnected) { window.removeEventListener("resize", draw); return; }
+    box.innerHTML = ccArea(rows, box.clientWidth, box.clientHeight); };
+  draw(); window.addEventListener("resize", draw);
 }
 
 async function renderModule(key) { return renderModuleInto("#view", key); }
@@ -479,9 +560,7 @@ async function renderModuleInto(sel, key) {
     ? "Click a work order for its detail; click an asset id to open the asset."
     : "Click a row to see its details.";
   v.innerHTML = `
-    <h2>${d.title}</h2>
     ${d.period ? `<div class="muted periodline">Period: ${d.period}</div>` : ""}
-    <div class="blurb">${prettyLabel(d.blurb || "")}</div>
     ${kpiRow(d.kpis)}
     ${chartsHTML(d.charts)}
     ${d.map ? '<div class="card"><div class="card-h">Field map (assets by state)</div><div id="mapbox" class="leafmap"></div></div>' : ""}
@@ -496,19 +575,37 @@ async function renderGasFlowChain(sub) {
   const active = (sub && stops.some(m => m.key === sub)) ? sub : ((GFC_CUR && stops.some(m => m.key === GFC_CUR)) ? GFC_CUR : stops[0].key);
   GFC_CUR = active;
   v.innerHTML = `<div class="gfc-tabs">${stops.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
+  raiseActiveRow(v.querySelector(".gfc-tabs"));
   v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderGasFlowChain(b.getAttribute("data-gfc")));
   renderModuleInto("#gfc-body", active);
 }
 
-// Item 28: left-nav "Cross Landscape Reports" opens the cross-cutting reports as horizontal tabs on top.
+// Folder tabs: the selected tab joins the raised page below it, so its row must be the bottom row.
+// Like a classic multi-row tab dialog, the selected tab's row is moved to sit directly above the page.
+function raiseActiveRow(bar) {
+  if (!bar) return;
+  const tabs = [...bar.querySelectorAll(".gfc-tab")], act = bar.querySelector(".gfc-tab.active"); if (!act) return;
+  // measure the natural rows (in menu order), then freeze each row so moving one never reflows the others
+  // rows are bottom-aligned and the selected tab is taller, so group tabs by their bottom edge
+  const rows = []; tabs.forEach(t => { const y = t.offsetTop + t.offsetHeight, row = rows.find(r => Math.abs(r.y - y) < 4); row ? row.items.push(t) : rows.push({ y, items: [t] }); });
+  if (rows.length < 2) return;
+  const mine = rows.indexOf(rows.find(r => r.items.includes(act)));
+  const order = rows.filter((_, i) => i !== mine).concat([rows[mine]]);
+  bar.classList.add("rows");
+  bar.innerHTML = "";
+  order.forEach(r => { const d = document.createElement("div"); d.className = "gfc-row"; r.items.forEach(t => d.appendChild(t)); bar.appendChild(d); });
+}
+// Item 28: left-nav "Analytics" opens the cross-cutting reports as horizontal tabs on top.
 async function renderCrossLandscape(sub) {
   const cross = crossMods(), v = $("#view");
   if (!cross.length) { v.innerHTML = '<div class="placeholder">No reports.</div>'; return; }
   const active = (sub && cross.some(m => m.key === sub)) ? sub : ((GFC_CROSS && cross.some(m => m.key === GFC_CROSS)) ? GFC_CROSS : cross[0].key);
   GFC_CROSS = active;
   v.innerHTML = `<div class="gfc-tabs">${cross.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
+  raiseActiveRow(v.querySelector(".gfc-tabs"));
   v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderCrossLandscape(b.getAttribute("data-gfc")));
-  if (active === "recommendations") renderRecommendations("#gfc-body");   // custom renderer (not a /api/module)
+  if (active === "recommendations") renderRecommendations("#gfc-body");   // custom renderers (not a /api/module)
+  else if (active === "weather") renderWeather("#gfc-body");
   else renderModuleInto("#gfc-body", active);
 }
 function roundsHTML() {
@@ -554,7 +651,7 @@ async function renderRecommendations(sel) {
 }
 function recoPill(status) { return pill(status === "accepted" ? "green" : status === "rejected" ? "red" : "amber") + " " + status; }
 function recoActions(status) {
-  // item 57: once accepted / rejected / annotated the annotation box is gone — only Undo remains
+  // item 57: once accepted / rejected / annotated the annotation box is gone, only Undo remains
   if (status && status !== "proposed")
     return `<button class="btn ghost r-undo">↶ Undo</button>`;
   return `<input class="r-note" placeholder="annotation (optional)" style="flex:1;min-width:220px"/>
@@ -564,45 +661,31 @@ function recoActions(status) {
 }
 function recoCard(r) {
   const decided = r.status && r.status !== "proposed";
-  return `<div class="reco" data-id="${r.rec_id}"><h4>${r.asset_id} — <span class="muted">${r.constraint_type}</span> <span class="r-status">${decided ? recoPill(r.status) : ""}</span></h4>
+  return `<div class="reco" data-id="${r.rec_id}"><h4>${r.asset_id}: <span class="muted">${r.constraint_type}</span> <span class="r-status">${decided ? recoPill(r.status) : ""}</span></h4>
     <div>${r.recommendation}</div>
-    <div class="ev">Maturity: ${r.maturity_level || "—"} · Production at risk: ${fmt(r.production_at_risk_e3m3d)} ×10³m³/d</div>
-    ${r.evidence ? `<div class="ev">Evidence: ${r.evidence}</div>` : ""}
+    <div class="ev">Maturity: ${r.maturity_level || "-"} · Production at risk: ${fmt(r.production_at_risk_e3m3d)} ×10³m³/d</div>
+    ${r.evidence ? `<div class="ev">Evidence: ${evidenceWithWOs(r.evidence, r.open_wos)}</div>` : ""}
+    ${(r.open_wos || []).length ? `<div class="ev">Open work orders on this asset: ${r.open_wos.map(w => `${woLink(w.wo_id)} ${pill(w.priority)}`).join(" ")}</div>` : ""}
     <div class="row r-actions">${recoActions(decided ? r.status : null)}</div>
     <span class="r-msg muted"></span></div>`;
-}
-
-async function renderCopilot() {
-  const v = $("#view");
-  v.innerHTML = `<h2>Ask me anything</h2>
-    <div class="copilot-box"><input id="cop_q" placeholder="e.g. Which compressor is the current field constraint and why?"/><button class="btn" id="cop_go">Ask</button></div>
-    <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:14px">${["Which five wells lost the most gas to deferment, and the coded cause and dollar impact?", "Show every compressor whose vibration is rising and that is the current field constraint.", "Which streams are closest to breaching dewpoint or H2S/CO2 spec?", "Reconcile allocated vs metered volumes and flag the largest UAF by area."].map(q => `<div class="card" style="cursor:pointer" data-q="${q.replace(/"/g, "&quot;")}">${q}</div>`).join("")}</div>
-    <div id="cop_a"></div>`;
-  const ask = async (qtext) => {
-    $("#cop_a").innerHTML = '<div class="answer muted">Thinking…</div>';
-    const r = await postJSON("/api/copilot", { question: qtext });
-    $("#cop_a").innerHTML = `<div class="answer">${(r.answer || "").replace(/</g, "&lt;")}</div>`;
-  };
-  $("#cop_go").onclick = () => ask($("#cop_q").value);
-  $("#cop_q").addEventListener("keydown", e => { if (e.key === "Enter") ask($("#cop_q").value); });
-  v.querySelectorAll("[data-q]").forEach(c => c.onclick = () => { $("#cop_q").value = c.getAttribute("data-q"); ask(c.getAttribute("data-q")); });
 }
 
 /* ---------- 3D navigator ---------- */
 async function renderNavigator() {
   const v = $("#view"); v.innerHTML = '<div class="placeholder">Loading navigator…</div>';
   let scenes; try { scenes = await getJSON("/api/scenes"); } catch (e) { v.innerHTML = `<div class="placeholder">Navigator unavailable. ${e}</div>`; return; }
-  v.innerHTML = `<h2>3D Asset Navigator</h2>
-    <div class="nav3">
-      <div class="n3-left"><div class="card-h">Value-chain stops</div>
-        <div class="scene-head"><span>Stop</span><span>Assets</span></div>
+  v.innerHTML = `<div class="nav3">
+      <div class="n3-left">
+        <div class="scene-head"><span>Value chain stop</span><span>Assets</span></div>
         <div id="scenelist">${scenes.map(s => `<div class="scene-item" data-scene="${s.scene_id}"><span>${sceneLabel(s.scene_id)}</span><span>${s.red ? '<span class="dot red"></span>' : s.amber ? '<span class="dot amber"></span>' : '<span class="dot green"></span>'} ${s.assets}</span></div>`).join("")}</div></div>
       <div class="n3-stage"><div id="canvas"></div></div>
-      <div class="n3-right" id="detail"><div class="muted">Select a stop, then click an asset in the scene.</div></div>
+      <div class="n3-right" id="detail"></div>
     </div>`;
   v.querySelectorAll("[data-scene]").forEach(b => b.onclick = () => { v.querySelectorAll(".scene-item").forEach(x => x.classList.remove("active")); b.classList.add("active"); loadScene(b.getAttribute("data-scene")); });
   if (scenes.length) {
-    const want = PENDING_SCENE && scenes.some(s => s.scene_id === PENDING_SCENE) ? PENDING_SCENE : scenes[0].scene_id;
+    // PENDING_SCENE may be a scene id or a site's area code (from the Field Map); match either
+    const hit = PENDING_SCENE && scenes.find(s => s.scene_id === PENDING_SCENE || s.scene_id.replace(/^scene_/, "").replace(/_wh$/, "") === PENDING_SCENE);
+    const want = hit ? hit.scene_id : scenes[0].scene_id;
     PENDING_SCENE = null;
     const btn = Array.from(v.querySelectorAll(".scene-item")).find(x => x.getAttribute("data-scene") === want) || v.querySelector(".scene-item");
     btn.classList.add("active"); loadScene(want);
@@ -611,43 +694,177 @@ async function renderNavigator() {
 function sceneLabel(s) { return s.replace("scene_", "").replace("_wh", " wellhead").replace("CPF001", "CPF Train 1").replace("CPF002", "CPF Train 2").replace("GTH001", "Gathering").replace("MET", "Custody metering"); }
 async function loadScene(sceneId) {
   const assets = await getJSON("/api/scene/" + encodeURIComponent(sceneId));
-  const canvas = $("#canvas"); const detail = $("#detail");
-  detail.innerHTML = `<div class="card-h">${sceneLabel(sceneId)}</div><div class="kv"><span>Assets at this stop</span><span>${assets.length}</span></div><div class="kv"><span>Alarms</span><span>${assets.filter(a => a.pin_colour === "red").length}</span></div><div class="muted" style="margin-top:8px">Click an asset to inspect its live tags, health and advisory.</div>`;
+  const canvas = $("#canvas");
+  closeAssetPanel();   // the detail panel only slides in once an asset or tag is clicked
   if (window.Twin3D && assets.length) {
     canvas.classList.add("three");
-    try { window.Twin3D.load("#canvas", assets, loadAsset, {}); return; } catch (e) { canvas.classList.remove("three"); }
+    try { window.Twin3D.load("#canvas", assets, loadAsset, { onEmpty: closeAssetPanel }); return; } catch (e) { canvas.classList.remove("three"); }
   }
   // 2D hotspot fallback
   canvas.classList.remove("three"); canvas.innerHTML = "";
   const n = assets.length, cols = Math.max(1, Math.ceil(Math.sqrt(n))), rows = Math.max(1, Math.ceil(n / cols));
   assets.forEach((a, i) => { const c = i % cols, r = Math.floor(i / cols); const h = el(`<div class="hotspot ${a.pin_colour || "green"}" style="left:${((c + 0.5) / cols) * 100}%;top:${((r + 0.5) / rows) * 100}%"><span class="label">${a.asset_id}</span></div>`); h.onclick = () => loadAsset(a.asset_id); canvas.appendChild(h); });
 }
-async function loadAsset(asset_id) {
-  const d = await getJSON("/api/asset/" + encodeURIComponent(asset_id));
-  const s = d.state || {};
-  const tagRows = (d.tags || []).slice(0, 24);
-  $("#detail").innerHTML = `<div class="card-h">${asset_id} ${pill(s.pin_colour)}</div>
-    <div class="kv"><span>Type</span><span>${humanVal(s.equipment_type || "–")}</span></div>
-    <div class="kv"><span>Area</span><span>${s.area_code || "–"}</span></div>
-    <div class="kv"><span>Health</span><span>${fmt(s.health_score)}</span></div>
-    <div class="kv"><span>Production at risk</span><span>${fmt(s.production_at_risk_e3m3d)} ×10³m³/d</span></div>
-    <div class="kv"><span>Open work orders</span><span>${fmt(s.open_wos)}</span></div>
-    ${d.recommendations && d.recommendations.length ? `<div class="banner" style="margin-top:10px">${d.recommendations[0].recommendation}<div class="ev">${d.recommendations[0].evidence || ""}</div></div>` : ""}
-    <div class="card-h" style="margin-top:12px">Live tags</div>
-    <table><tbody>${tagRows.map(t => `<tr><td>${humanVal(t.signal)}</td><td class="num">${fmt(t.latest_value)} ${prettyUnit(t.unit)}</td><td>${pill(t.latest_quality === "good" ? "green" : "amber")}</td></tr>`).join("")}</tbody></table>`;
+function closeAssetPanel() { const p = $("#detail"); if (p) p.classList.remove("open"); }
+function loadAsset(asset_id) {
+  const p = $("#detail"); if (!p) return;
+  p.setAttribute("data-asset", asset_id);
+  p.scrollTop = 0; p.classList.add("open");
+  renderAssetDetail(p, asset_id, { in3d: true, onClose: closeAssetPanel });
+}
+
+/* ---------- Impact analysis: reservoir-to-customer Sankey ---------- */
+// A small flow-bands glyph for the Command Centre link (theme colours, no external image).
+const IMPACT_ICON = `<svg viewBox="0 0 80 64" aria-hidden="true">
+  <rect x="2" y="6" width="9" height="20" rx="2" fill="#0c5a66"/><rect x="2" y="32" width="9" height="26" rx="2" fill="#2f7dc4"/>
+  <rect x="35" y="14" width="9" height="38" rx="2" fill="#c98a1e"/>
+  <rect x="69" y="4" width="9" height="16" rx="2" fill="#6a5cf0"/><rect x="69" y="24" width="9" height="14" rx="2" fill="#2e9c6a"/><rect x="69" y="42" width="9" height="18" rx="2" fill="#dd4b1a"/>
+  <path d="M11 16 C24 16 22 22 35 22" stroke="#0c5a66" stroke-opacity=".35" stroke-width="20" fill="none"/>
+  <path d="M11 45 C24 45 22 40 35 40" stroke="#2f7dc4" stroke-opacity=".35" stroke-width="24" fill="none"/>
+  <path d="M44 19 C57 19 56 12 69 12" stroke="#6a5cf0" stroke-opacity=".35" stroke-width="10" fill="none"/>
+  <path d="M44 31 C57 31 56 31 69 31" stroke="#2e9c6a" stroke-opacity=".35" stroke-width="12" fill="none"/>
+  <path d="M44 45 C57 45 56 51 69 51" stroke="#dd4b1a" stroke-opacity=".35" stroke-width="16" fill="none"/></svg>`;
+const IMP_COLS = [["reservoir", "Reservoir"], ["wells", "Well pads"], ["gathering", "Gathering"], ["processing", "Processing"],
+                  ["compression", "Compression"], ["custody", "Custody"], ["customer", "Customers"]];
+const IMP_STOP_COL = { reservoir: "#0c5a66", wells: "#2f7dc4", gathering: "#2e9c6a", processing: "#c98a1e", compression: "#6a5cf0", custody: "#3d5566" };
+const IMP_SEG_COL = { "LNG export": "#0c5a66", "LNG portfolio": "#3a8a96", "Retail": "#2f7dc4", "Distribution": "#6aa0d8", "Power generation": "#c98a1e",
+                      "Industrial": "#6a5cf0", "Manufacturing": "#9a8cf5", "Mining": "#8a6d3b", "Spot market": "#8c9aa6" };
+let IMP = null;   // { g, sel, res, layout }
+
+async function renderImpact() {
+  const v = $("#view");
+  v.innerHTML = `<div class="imp">
+    <div class="imp-head">
+      <div><h2>Impact analysis</h2><div class="muted" id="impSub">Loading the supply network…</div></div>
+      <div class="imp-acts"><button class="btn ghost" id="impClear" disabled>Clear</button><button class="btn" id="impPdf" disabled>Download Impact Details (PDF)</button></div>
+    </div>
+    <div class="imp-body"><div class="imp-chart" id="impChart"></div><div class="imp-side"><div class="imp-hint" id="impHint">Click any stop in the flow to trace what feeds it and what it supplies, down to the customers.</div><div class="imp-bubble" id="impBubble"></div></div></div>
+  </div>`;
+  let g; try { g = await getJSON("/api/impact/graph"); } catch (e) { $("#impSub").textContent = "Impact analysis unavailable. " + e; return; }
+  if (CUR !== "impact") return;
+  IMP = { g, sel: null, res: null };
+  $("#impSub").textContent = `Gas flow from reservoir to customer: the average gas day over the 30 gas days to ${fmtLong(g.as_of)}. Band widths are flow; click a stop to trace it, click empty space to clear.`;
+  $("#impClear").onclick = () => impactSelect(null);
+  $("#impPdf").onclick = async () => {
+    if (!IMP || !IMP.sel) return;
+    loaderStart();
+    try {
+      const r = await fetch("/api/impact/pdf/" + encodeURIComponent(IMP.sel)); if (!r.ok) throw new Error(r.status);
+      const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob());
+      a.download = "impact_" + IMP.sel.replace(/[^A-Za-z0-9_-]/g, "_") + ".pdf"; document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (e) { alert("Could not build the PDF: " + e); }
+    finally { loaderEnd(); }
+  };
+  const chart = $("#impChart");
+  const draw = () => { if (!chart.isConnected) { window.removeEventListener("resize", draw); return; } drawSankey(chart); if (IMP.res) applyImpact(); };
+  draw(); window.addEventListener("resize", draw);
+}
+function fmtLong(d) { if (!d) return "the latest gas day"; const x = new Date(d + "T00:00:00"); return isNaN(x) ? d : x.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }); }
+
+// Sankey layout: one column per value-chain stop, node height = throughput, link width = flow.
+function drawSankey(host) {
+  const g = IMP.g, W = Math.max(720, host.clientWidth), H = Math.max(420, host.clientHeight);
+  const top = 30, bot = 8, left = 6, labelR = 170, nodeW = 12, colGap = (W - left - labelR - nodeW) / (IMP_COLS.length - 1);
+  const byId = {}, cols = IMP_COLS.map(() => []);
+  g.nodes.forEach(n => { const o = { ...n, tp: Number(n.throughput_e3m3d) || 0, ins: [], outs: [] }; byId[n.node_id] = o; cols[(n.stop_order || 1) - 1].push(o); });
+  const links = g.links.map(l => ({ ...l, f: Number(l.flow_e3m3d) || 0, s: byId[l.from_id], t: byId[l.to_id] })).filter(l => l.s && l.t && l.f > 0);
+  links.forEach(l => { l.s.outs.push(l); l.t.ins.push(l); });
+  const gapOf = c => Math.min(6, (H - top - bot) * 0.22 / Math.max(1, c.length - 1));
+  const k = Math.min(...cols.map(c => (H - top - bot - gapOf(c) * (c.length - 1)) / Math.max(1, c.reduce((a, n) => a + n.tp, 0))));
+  cols.forEach((c, ci) => c.forEach(n => { n.x = left + ci * colGap; n.h = Math.max(1.5, n.tp * k); n.col = ci; }));
+  const place = c => { const gap = gapOf(c), tot = c.reduce((a, n) => a + n.h, 0) + gap * (c.length - 1); let y = top + Math.max(0, (H - top - bot - tot) / 2); c.forEach(n => { n.y = y; y += n.h + gap; }); };
+  // order: reservoirs by size, then each column by the flow-weighted centre of what feeds it (fewer crossings)
+  cols[0].sort((a, b) => b.tp - a.tp); place(cols[0]);
+  for (let pass = 0; pass < 3; pass++) {
+    for (let ci = 1; ci < cols.length; ci++) {
+      cols[ci].forEach(n => { const w = n.ins.reduce((a, l) => a + l.f, 0); n.bc = w ? n.ins.reduce((a, l) => a + l.f * (l.s.y + l.s.h / 2), 0) / w : 0; });
+      cols[ci].sort((a, b) => a.bc - b.bc); place(cols[ci]);
+    }
+    for (let ci = cols.length - 2; ci >= 0; ci--) {
+      cols[ci].forEach(n => { const w = n.outs.reduce((a, l) => a + l.f, 0); n.bc = w ? n.outs.reduce((a, l) => a + l.f * (l.t.y + l.t.h / 2), 0) / w : n.y; });
+      cols[ci].sort((a, b) => a.bc - b.bc); place(cols[ci]);
+    }
+  }
+  // stack link ends on each node in the order of the node they connect to
+  Object.values(byId).forEach(n => {
+    let so = 0; n.outs.sort((a, b) => a.t.y - b.t.y).forEach(l => { l.w = Math.max(0.6, l.f * k); l.sy = n.y + so + l.w / 2; so += l.f * k; });
+    let to = 0; n.ins.sort((a, b) => a.s.y - b.s.y).forEach(l => { l.ty = n.y + to + Math.max(0.6, l.f * k) / 2; to += l.f * k; });
+  });
+  const colOf = n => n.stop === "customer" ? (IMP_SEG_COL[(g.customers.find(c => c.customer_id === n.node_id) || {}).segment] || "#8c9aa6") : (IMP_STOP_COL[n.stop] || "#5f7185");
+  const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const unitTj = n => `${fmt(n.tp)} 10³ m³/d (${fmt(n.tp * 0.038)} TJ/d)`;
+  const linkSvg = links.map(l => { const x0 = l.s.x + nodeW, x1 = l.t.x, xm = (x0 + x1) / 2;
+    return `<path class="imp-link" data-k="${esc(l.from_id)}>${esc(l.to_id)}" d="M${x0.toFixed(1)},${l.sy.toFixed(1)} C${xm.toFixed(1)},${l.sy.toFixed(1)} ${xm.toFixed(1)},${l.ty.toFixed(1)} ${x1.toFixed(1)},${l.ty.toFixed(1)}" stroke="${colOf(l.s)}" stroke-width="${l.w.toFixed(2)}"><title>${esc(l.s.node_name)} → ${esc(l.t.node_name)}: ${fmt(l.f)} 10³ m³/d</title></path>`; }).join("");
+  const nodeSvg = Object.values(byId).map(n => {
+    const lab = n.h >= 9 || n.col >= 5 || n.col === 0 || n.col === 3;
+    // short labels so every column reads cleanly; the full name is in the tooltip
+    const name = n.stop === "wells" || n.stop === "gathering" ? n.node_id
+      : n.stop === "compression" ? n.node_id.replace(/^(CPF\d+)-CMP-CP-/, "$1 · ")
+      : n.stop === "custody" ? `${n.node_id} · ${n.node_name.replace(/^Sales gas metering, /, "").replace(/ \([^)]*Basin\)$/, "")}`
+      : n.node_name.replace(/ \([^)]*Basin\)$/, "");
+    const st = n.stop === "wells" ? "" : n.status === "red" ? ' data-st="red"' : n.status === "amber" ? ' data-st="amber"' : "";
+    return `<g class="imp-node" data-id="${esc(n.node_id)}"${st}><rect x="${n.x}" y="${n.y.toFixed(1)}" width="${nodeW}" height="${n.h.toFixed(1)}" rx="2" fill="${colOf(n)}"/>
+      <rect class="imp-hit" x="${n.x - 3}" y="${(n.y - 1).toFixed(1)}" width="${nodeW + 6}" height="${(n.h + 2).toFixed(1)}"/>
+      ${lab ? `<text x="${n.x + nodeW + 5}" y="${(n.y + n.h / 2 + 3.5).toFixed(1)}" class="imp-lab${n.col >= 5 ? " big" : ""}">${esc(name)}</text>` : ""}
+      <title>${esc(n.node_name)}\n${unitTj(n)}${n.status && n.status !== "green" ? `\nHealth: ${n.status}` : ""}\nClick to trace</title></g>`; }).join("");
+  const heads = IMP_COLS.map((c, i) => `<text class="imp-colh" x="${left + i * colGap}" y="16">${c[1]}</text>`).join("");
+  host.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="imp-svg"><rect class="imp-bg" x="0" y="0" width="${W}" height="${H}"/>${heads}<g class="imp-links">${linkSvg}</g>${nodeSvg}</svg>`;
+  IMP.layout = { byId, H };
+  host.querySelector(".imp-bg").onclick = () => impactSelect(null);
+  host.querySelectorAll(".imp-node").forEach(el => el.onclick = e => { e.stopPropagation(); impactSelect(el.getAttribute("data-id")); });
+}
+
+async function impactSelect(id) {
+  if (!IMP) return;
+  IMP.sel = id; IMP.res = null;
+  $("#impPdf").disabled = !id; $("#impClear").disabled = !id;
+  if (!id) { applyImpact(); return; }
+  const svg = $("#impChart svg"); if (svg) svg.classList.add("busy");
+  let r; try { r = await getJSON("/api/impact/select/" + encodeURIComponent(id)); } catch (e) { r = null; }
+  if (!IMP || IMP.sel !== id) return;            // a newer click won
+  IMP.res = r; applyImpact();
+}
+
+function applyImpact() {
+  const svg = $("#impChart svg"), bub = $("#impBubble"), hint = $("#impHint"); if (!svg) return;
+  svg.classList.remove("busy");
+  const r = IMP.res;
+  svg.classList.toggle("has-sel", !!r);
+  const on = new Set(r ? r.highlight_nodes : []), lk = new Set(r ? r.highlight_links : []);
+  svg.querySelectorAll(".imp-node").forEach(el => { const id = el.getAttribute("data-id"); el.classList.toggle("on", on.has(id)); el.classList.toggle("sel", !!r && id === r.node.node_id); });
+  svg.querySelectorAll(".imp-link").forEach(el => el.classList.toggle("on", lk.has(el.getAttribute("data-k"))));
+  if (!r) { bub.classList.remove("open"); hint.style.display = ""; return; }
+  hint.style.display = "none";
+  const n = r.node, t = r.totals, cs = r.customers;
+  const isCust = n.stop === "customer";
+  bub.innerHTML = `<div class="ib-head">
+      <div class="ib-k">${n.stop_label}</div><div class="ib-t">${n.node_name}</div>
+      <div class="ib-m">${isCust ? `Supplied through ${t.upstream_stops} upstream stops` : `${t.upstream_stops} stops upstream · ${t.downstream_stops} downstream`} · ${fmt(n.throughput_e3m3d)} 10³ m³/d</div>
+    </div>
+    <div class="ib-sum"><div><b>${t.customers}</b><span>${t.customers === 1 ? "customer" : "customers"}</span></div><div><b>${fmt(t.at_risk_tj_d)}</b><span>TJ/d ${isCust ? "supplied" : "at risk"}</span></div><div><b>$${fmt(t.revenue_at_risk_per_day)}</b><span>revenue / day</span></div></div>
+    <div class="ib-list">${cs.length ? cs.map(c => `<div class="ib-c" data-id="${escAttr(c.customer_id)}">
+        <div class="ib-c1"><span class="ib-dot" style="background:${IMP_SEG_COL[c.segment] || "#8c9aa6"}"></span><b>${c.customer_name}</b><span class="ib-v">${fmt(c.at_risk_tj_d)} TJ/d</span></div>
+        <div class="ib-c2">${c.segment} · ${c.location} · ${c.delivery_point} · ${c.contract_type}<span class="ib-p">${fmt(c.pct_of_supply)}% of its gas</span></div>
+        <div class="ib-bar"><i style="width:${Math.min(100, Number(c.pct_of_supply) || 0)}%"></i></div></div>`).join("") : `<div class="muted" style="padding:10px 2px">No customers downstream of this stop.</div>`}</div>`;
+  bub.classList.add("open");
+  bub.querySelectorAll(".ib-c").forEach(el => el.onclick = () => impactSelect(el.getAttribute("data-id")));
+  // aim the bubble's tail at the customers it lists (their centre on the chart)
+  const ys = cs.map(c => IMP.layout.byId[c.customer_id]).filter(Boolean).map(o => o.y + o.h / 2);
+  const box = bub.getBoundingClientRect(), sb = svg.getBoundingClientRect();
+  const yc = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 + sb.top - box.top : 40;
+  bub.style.setProperty("--tail", Math.max(22, Math.min(box.height - 22, yc)) + "px");
 }
 
 /* ---------- Leaflet map ---------- */
 function renderMapScreen() {
   const v = $("#view");
-  v.innerHTML = `<h2>Field Map</h2>
-    <div class="blurb">Every value-chain stop on the map, coloured by worst-case severity and sized by production-at-risk. Zoom in to resolve assets. Click a facility to open its 3D scene.</div>
-    <div id="mapbox" class="leafmap"></div>`;
+  v.innerHTML = `<div id="mapbox" class="leafmap"></div>`;
   renderMapInto("#mapbox");
 }
 
-// Item 5: Facility view — the whole field on the Australia map, a typed icon per facility; click a
-// facility to open its detail drawer and jump into the 3D visualization.
+// Assets map: every asset across the field on the Australia map, a typed icon per asset; click an
+// asset to open its detail drawer and jump into the 3D visualization.
 const FAC_CAT = {
   wellhead: ["Well", "#2f7dc4", "W"],
   gathering_line: ["Gathering", "#2e9c6a", "G"], gathering_segment: ["Gathering", "#2e9c6a", "G"],
@@ -658,20 +875,17 @@ function facCat(t) { return FAC_CAT[t] || ["Processing", "#c98a1e", "P"]; }
 async function renderFacilityView() {
   const v = $("#view");
   const cats = [["Well", "#2f7dc4", "W"], ["Gathering", "#2e9c6a", "G"], ["Processing", "#c98a1e", "P"], ["Compression", "#e0533a", "C"], ["Custody", "#6a5cf0", "M"]];
-  v.innerHTML = `<h2>Facility view</h2>
-    <div class="blurb">Every facility across the field on the Australia map, by type. Click a facility to open its detail and jump into the 3D visualization.</div>
-    <div class="faclegend">${cats.map(c => `<span class="fl-item"><span class="fl-ic" style="background:${c[1]}">${c[2]}</span>${c[0]}</span>`).join("")}</div>
+  v.innerHTML = `<div class="faclegend">${cats.map(c => `<span class="fl-item"><span class="fl-ic" style="background:${c[1]}">${c[2]}</span>${c[0]}</span>`).join("")}</div>
     <div id="facmap" class="leafmap"></div>`;
   const host = $("#facmap"); if (!host || typeof L === "undefined") { if (host) host.innerHTML = '<div class="muted" style="padding:16px">map unavailable</div>'; return; }
   if (_leaf) { try { _leaf.remove(); } catch (e) {} _leaf = null; }
+  fitMapHeight(host);
   const map = L.map(host, { minZoom: 3, maxZoom: 16, zoomControl: true });
-  map.fitBounds([[-43.5, 113.0], [-10.5, 154.0]]); _leaf = map;
+  map.setView([-26.5, 132.6], 5); _leaf = map;   // same opening view as the Field Map
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { subdomains: "abc", maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
   let facs; try { facs = await getJSON("/api/assets_bbox"); } catch (e) { return; }
-  // Item 15: a cluster aggregates facilities of different types, so show it as a magnifying-glass +
-  // count ("drill in"), not a plain number bubble.
-  const magSvg = '<svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="8.5" cy="8.5" r="5.5"></circle><line x1="12.6" y1="12.6" x2="18" y2="18"></line></svg>';
-  const clusterIcon = c => L.divIcon({ className: "faccluster", html: `<span class="facmag">${magSvg}<b>${c.getChildCount()}</b></span>`, iconSize: [48, 30], iconAnchor: [24, 15] });
+  // a group of assets shows its count as a pill
+  const clusterIcon = c => L.divIcon({ className: "faccluster", html: `<span class="facmag"><b>${c.getChildCount()} assets</b></span>`, iconSize: [86, 30], iconAnchor: [43, 15] });
   const layer = (window.L.markerClusterGroup ? L.markerClusterGroup({ maxClusterRadius: 44, iconCreateFunction: clusterIcon }) : L.layerGroup());
   const SKIP = new Set(["esp", "gas_lift"]);   // artificial-lift kit is co-located with its wellhead; show one marker per well
   facs.forEach(f => {
@@ -686,24 +900,44 @@ async function renderFacilityView() {
   map.addLayer(layer);
   setTimeout(() => map.invalidateSize(), 200);
 }
+// Size a map to the space left below its header/legend so the page never scrolls.
+function fitMapHeight(host) {
+  const fit = () => { if (!host.isConnected) { window.removeEventListener("resize", fit); return; }
+    const vb = $("#view").getBoundingClientRect().bottom, inTab = host.closest("#gfc-body") ? 20 : 0;
+    host.style.height = Math.max(360, vb - host.getBoundingClientRect().top - 18 - inTab) + "px";
+    if (_leaf) _leaf.invalidateSize(); };
+  fit(); window.addEventListener("resize", fit);
+}
 async function renderMapInto(sel) {
   const host = $(sel); if (!host || typeof L === "undefined") { if (host) host.innerHTML = '<div class="muted" style="padding:16px">map unavailable</div>'; return; }
   if (_leaf) { try { _leaf.remove(); } catch (e) {} _leaf = null; }
+  fitMapHeight(host);
   const map = L.map(host, { minZoom: 3, maxZoom: 16, zoomControl: true, preferCanvas: true });
-  // frame the Australian continent exactly — "eye level", not the whole Asia-Pacific
-  map.fitBounds([[-43.5, 113.0], [-10.5, 154.0]]);
+  // open zoomed onto the mainland basins where the facilities are, not the whole Asia-Pacific
+  map.setView([-26.5, 132.6], 5);
   _leaf = map;
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { subdomains: "abc", maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
   let data; try { data = await getJSON("/api/map"); } catch (e) { return; }
   const facs = data.facilities || []; const maxR = Math.max(1, ...facs.map(f => f.risk_dollars || 0));
   const col = { red: "#e0533a", amber: "#e0a53a", green: "#37b98a" };
-  const layer = (window.L.markerClusterGroup ? L.markerClusterGroup() : L.layerGroup());
+  const siteCluster = c => { const n = c.getChildCount();
+    return L.divIcon({ className: `marker-cluster sitecl marker-cluster-${n < 10 ? "small" : n < 100 ? "medium" : "large"}`,
+      html: `<div><span>${n} sites</span></div>`, iconSize: [72, 40] }); };
+  const layer = (window.L.markerClusterGroup ? L.markerClusterGroup({ iconCreateFunction: siteCluster }) : L.layerGroup());
   facs.forEach(f => {
     // sized so every facility is easy to see: a visible base + growth with asset count + risk emphasis
-    const rad = 9 + Math.sqrt(f.assets || 1) * 2.4 + Math.sqrt((f.risk_dollars || 0) / maxR) * 14;
-    const mk = L.circleMarker([f.lat, f.lon], { radius: rad, color: col[f.pin_colour] || "#37b98a", fillColor: col[f.pin_colour] || "#37b98a", fillOpacity: .7, weight: 1 });
-    mk.bindPopup(`<b>${f.area_code}</b><br>${f.assets} assets · ${f.red} red / ${f.amber} amber<br>PAR: ${fmt(f.risk_dollars)} ×10³m³/d`);
-    mk.on("click", () => { setTimeout(() => { select("navigator"); }, 400); });
+    const rad = 15 + Math.sqrt(f.assets || 1) * 2.4 + Math.sqrt((f.risk_dollars || 0) / maxR) * 14;
+    // a single site reads "1 site", matching the "N sites" group bubbles
+    const d = Math.round(rad * 2), c = col[f.pin_colour] || "#37b98a";
+    const mk = L.marker([f.lat, f.lon], { icon: L.divIcon({ className: "site1", iconSize: [d, d],
+      html: `<div style="width:${d}px;height:${d}px;background:${c}b3;border:1px solid ${c}">1 site</div>` }) });
+    const healthy = Math.max(0, (f.assets || 0) - (f.red || 0) - (f.amber || 0));
+    const par = Number(f.risk_dollars) > 0 ? `${fmt(f.risk_dollars)} ×10³m³/d` : "none";
+    mk.bindTooltip(`<div class="sitetip"><b>${f.name || f.area_code}</b>${f.name && !f.name.includes(f.area_code) ? `<span class="muted"> ${f.area_code}</span>` : ""}
+      <div>${f.assets} assets: <span class="st-r">${f.red} red</span> · <span class="st-a">${f.amber} amber</span> · <span class="st-g">${healthy} healthy</span></div>
+      <div>Production at risk: ${par}</div><div class="muted">Click for site view</div></div>`,
+      { direction: "top", offset: [0, -Math.round(rad)], opacity: 1 });
+    mk.on("click", () => { mk.closeTooltip(); PENDING_SCENE = f.area_code; select("navigator"); });
     layer.addLayer(mk);
   });
   map.addLayer(layer);
@@ -711,11 +945,9 @@ async function renderMapInto(sel) {
 }
 
 /* ---------- Weather & Environment: per-location map (item 39) ---------- */
-async function renderWeather() {
-  const v = $("#view");
-  v.innerHTML = `<h2>Weather & Environment</h2>
-    <div class="blurb">Per-location weather across the field. Australia spans the tropical north to the cool south, so each site has its own temperature, wind and risk profile — there is no single field average. Click a site for its history.</div>
-    <div id="wxtiles" class="kpis"></div>
+async function renderWeather(sel) {
+  const v = $(sel || "#view");
+  v.innerHTML = `    <div id="wxtiles" class="kpis"></div>
     <div class="faclegend"><span class="fl-item">Marker colour = average temperature (cool blue → hot red)</span></div>
     <div id="wxmap" class="leafmap"></div>`;
   let sites; try { sites = await getJSON("/api/weather_map"); } catch (e) { $("#wxmap").innerHTML = '<div class="muted" style="padding:16px">weather unavailable</div>'; return; }
@@ -724,38 +956,43 @@ async function renderWeather() {
   const windiest = sites.reduce((a, b) => b.wind_max > a.wind_max ? b : a);
   const flood = sites.filter(s => s.fld_max > 0.3).length, ltn = sites.filter(s => s.ltn_max > 0.5).length;
   $("#wxtiles").innerHTML = [
-    [`${fmt(hottest.tmax)}°C`, "Hottest site", `${hottest.area_code} peak`],
-    [`${fmt(windiest.wind_max)} km/h`, "Windiest site", `${windiest.area_code} peak gust`],
-    [flood, "Sites at flood risk", "flood-risk index above 0.3 at some point"],
-    [ltn, "Sites at lightning risk", "lightning-risk index above 0.5 at some point"],
-  ].map(t => `<div class="kpi"><div class="kpi-v">${t[0]}</div><div class="kpi-l">${t[1]} ${infoI(t[2])}</div></div>`).join("");
+    [`${fmt(hottest.tmax)}°C`, "Hottest site", "Highest daily temperature recorded at any site over the period.", hottest],
+    [`${fmt(windiest.wind_max)} km/h`, "Windiest site", "Strongest daily wind recorded at any site over the period.", windiest],
+    [flood, "Sites at flood risk", "Sites whose flood-risk index went above 0.3 at some point."],
+    [ltn, "Sites at lightning risk", "Sites whose lightning-risk index went above 0.5 at some point."],
+  ].map(t => `<div class="kpi${t[3] ? " click" : ""}"${t[3] ? ` data-wx="${escAttr(t[3].area_code)}" title="Open this site's weather history"` : ""}><div class="kpi-v">${t[0]}</div><div class="kpi-l">${t[1]} ${infoI(t[2])}</div>${t[3] ? `<div class="kpi-site">${t[3].name || t[3].area_code}</div>` : ""}</div>`).join("");
+  $("#wxtiles").querySelectorAll("[data-wx]").forEach(k => k.onclick = () => openWeatherSite(k.getAttribute("data-wx"), (sites.find(s => s.area_code === k.getAttribute("data-wx")) || {}).name));
   const host = $("#wxmap"); if (!host || typeof L === "undefined") return;
   if (_leaf) { try { _leaf.remove(); } catch (e) {} _leaf = null; }
-  const map = L.map(host, { minZoom: 3, maxZoom: 16, zoomControl: true });
-  map.fitBounds([[-43.5, 113.0], [-10.5, 154.0]]); _leaf = map;
+  fitMapHeight(host);
+  const map = L.map(host, { minZoom: 3, maxZoom: 16, zoomControl: true, zoomSnap: 0.25 });
+  // fit the Australian mainland tightly (fractional zoom), so the sites fill the map
+  map.fitBounds([[-39.0, 113.2], [-11.0, 153.8]], { padding: [10, 10] }); _leaf = map;
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { subdomains: "abc", maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
   const tavgs = sites.map(s => s.tavg).filter(x => x != null), lo = Math.min(...tavgs), hi = Math.max(...tavgs);
   const col = t => { const f = (hi > lo) ? (t - lo) / (hi - lo) : 0.5; return `rgb(${Math.round(55 + f * 180)},90,${Math.round(215 - f * 170)})`; };
   sites.forEach(s => {
     if (s.lat == null) return;
     const mk = L.circleMarker([s.lat, s.lon], { radius: 9, color: "#fff", weight: 1, fillColor: col(s.tavg), fillOpacity: .85 });
-    mk.bindTooltip(`${s.area_code}: ${fmt(s.tmin)}–${fmt(s.tmax)}°C · wind ${fmt(s.wind_max)} km/h`);
-    mk.on("click", () => openWeatherSite(s.area_code));
+    mk.bindTooltip(`<b>${s.name || s.area_code}</b><br>${fmt(s.tmin)} to ${fmt(s.tmax)}°C · wind up to ${fmt(s.wind_max)} km/h`);
+    mk.on("click", () => openWeatherSite(s.area_code, s.name));
     mk.addTo(map);
   });
-  setTimeout(() => map.invalidateSize(), 200);
+  // re-fit once the tab has its final size: frame the weather sites themselves (they span the mainland)
+  const pts = sites.filter(s => s.lat != null).map(s => [s.lat, s.lon]);
+  const fit = () => { map.invalidateSize(); if (pts.length) map.fitBounds(pts, { padding: [36, 36], animate: false }); };
+  setTimeout(fit, 200);
 }
-async function openWeatherSite(area) {
+async function openWeatherSite(area, name) {
   let rows; try { rows = await getJSON("/api/weather_site/" + encodeURIComponent(area)); } catch (e) { return; }
-  let m = $("#chartmodal");
-  if (!m) { m = el(`<div id="chartmodal"><div class="cm-box"><div class="cm-head"><span class="cm-t"></span><button class="cm-x" title="Close">✕</button></div><div class="cm-body"></div></div></div>`); document.body.appendChild(m); m.addEventListener("click", e => { if (e.target === m || e.target.closest(".cm-x")) m.classList.remove("open"); }); }
-  m.querySelector(".cm-t").textContent = area + " — weather history";
+  const m = chartModal();
+  m.querySelector(".cm-t").textContent = (name || area) + ": weather history";
   m.querySelector(".cm-body").innerHTML = `<div class="wx-site-charts">
     <div class="card"><div class="card-h">Ambient temperature (°C)</div>${svgLine(rows, "obs_date", [{ key: "ambient_c", label: "°C" }])}</div>
     <div class="card"><div class="card-h">Wind (km/h)</div>${svgLine(rows, "obs_date", [{ key: "wind_kmh", label: "km/h" }])}</div>
     <div class="card"><div class="card-h">Lightning &amp; flood risk</div>${svgLine(rows, "obs_date", [{ key: "lightning_risk", label: "lightning" }, { key: "flood_risk", label: "flood" }])}</div>
   </div>`;
-  m.classList.add("open");
+  m.classList.add("open"); m.querySelector(".cm-body").scrollTop = 0;
 }
 
 /* ---------- Asset & Document Explorer: the tag contract, resolved live ---------- */
@@ -795,9 +1032,9 @@ async function renderAssetExplorer() {
     ${kpiRow(d.kpis)}
     <div class="explorer-split">
       <div class="card explorer-col">
-        <div class="card-h">Resolve a tag — the contract in action</div>
+        <div class="card-h">Resolve a tag: the contract in action</div>
         <div class="blurb" style="margin-bottom:10px">Type a tag, asset, area or signal. Each hit resolves the contextualized tag to its asset, functional location, latest sensor reading and its ids in every other system (PI historian, EAM, OSDU, P&ID): the one join key that ties OT to IT. Every asset here links to its 360.</div>
-        <div class="copilot-box"><input id="tl_q" placeholder="e.g. CPF002-CMP · vibration · BAR003-WB · dewpoint"/><button class="btn" id="tl_go">Resolve</button></div>
+        <div class="search-box"><input id="tl_q" placeholder="e.g. CPF002-CMP · vibration · BAR003-WB · dewpoint"/><button class="btn" id="tl_go">Resolve</button></div>
         <div style="display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 12px">${chips.map(x => `<span data-chip="${x}" style="cursor:pointer;font-size:11.5px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:3px 11px;color:var(--muted)">${x}</span>`).join("")}</div>
         <div id="tl_res"></div>
       </div>
@@ -808,7 +1045,7 @@ async function renderAssetExplorer() {
       </div>
     </div>`;
   const run = async (term) => {
-    if (!term || !term.trim()) { $("#tl_res").innerHTML = '<div class="muted">Type a tag, asset, area or signal to resolve the contract — or pick one from the location tree on the right.</div>'; return; }
+    if (!term || !term.trim()) { $("#tl_res").innerHTML = '<div class="muted">Type a tag, asset, area or signal to resolve the contract, or pick one from the location tree on the right.</div>'; return; }
     $("#tl_res").innerHTML = '<div class="muted">Resolving…</div>';
     let r; try { r = await getJSON("/api/tag-lookup?term=" + encodeURIComponent(term.trim())); } catch (e) { $("#tl_res").innerHTML = '<div class="muted">lookup error</div>'; return; }
     const rows = r.rows || [];
@@ -821,7 +1058,7 @@ async function renderAssetExplorer() {
   v.querySelectorAll("[data-chip]").forEach(c => c.onclick = () => { $("#tl_q").value = c.getAttribute("data-chip"); run(c.getAttribute("data-chip")); });
   // item 53: asset links inside results open the 360 drawer
   $("#tl_res").addEventListener("click", e => { const al = e.target.closest("[data-asset-id]"); if (al) { e.preventDefault(); openAssetDrawer(al.getAttribute("data-asset-id")); } });
-  // item 52: no pre-loaded results — start empty with a prompt
+  // item 52: no pre-loaded results: start empty with a prompt
   run("");
   wireLocationTree(run);
 }
@@ -865,44 +1102,53 @@ async function wireLocationTree(run) {
 function buildNav() {
   const groups = {};
   NAV.forEach(n => { (groups[n.group] = groups[n.group] || []).push(n); });
-  // Item 49: a flat menu — no group headings. Value-chain stops collapse into one "Gas flow chain"
-  // entry (item 9) and the cross-cutting reports into one "Cross Landscape Reports" entry (item 28).
+  // Item 49: a flat menu, no group headings. Value-chain stops collapse into one "Gas flow chain"
+  // entry (item 9) and the cross-cutting reports into one "Analytics" entry (item 28).
   $("#nav").innerHTML = Object.entries(groups).map(([g, items]) => {
     if (g === "Value chain") return `<button class="nav-item" data-key="gas_flow_chain"><span>Gas flow chain</span></button>`;
-    if (g === "Cross-cutting") return `<button class="nav-item" data-key="cross_landscape"><span>Cross Landscape Reports</span></button>`;
+    if (g === "Cross-cutting") return `<button class="nav-item" data-key="cross_landscape"><span>Analytics</span></button>`;
     return items.map(n => `<button class="nav-item" data-key="${n.key}"><span>${n.label}</span></button>`).join("");
   }).join("");
   $("#nav").querySelectorAll("[data-key]").forEach(b => b.onclick = () => select(b.getAttribute("data-key")));
+  $("#nav").addEventListener("scroll", placeTail);
 }
 let GENIE_URL;
 async function genieUrl() { if (GENIE_URL === undefined) { try { GENIE_URL = (await getJSON("/api/genie-link")).url; } catch (e) { GENIE_URL = null; } } return GENIE_URL; }
-// Utility links live top-right of the header: Ask Genie always, "Facility view" on value-chain stops.
-async function setHeadLinks(key) {
+// Utility link top-right of the header: the Genie lamp (opens the Genie space) on every screen.
+async function setHeadLinks() {
   const host = $("#headlinks"); if (!host) return;
-  const mod = (NAV || []).find(n => n.key === key);
-  const isVC = key === "gas_flow_chain" || key === "facility_view" || key === "navigator" || (mod && mod.group === "Value chain");
-  const links = [];
   const gu = await genieUrl();
-  if (gu) links.push(`<a class="hl" href="${gu}" target="_blank" rel="noopener">Ask Genie</a>`);
-  if (isVC) links.push(`<a class="hl" href="#" data-facility="1">Facility view</a>`);
-  host.innerHTML = links.join("");
-  const s = host.querySelector("[data-facility]"); if (s) s.onclick = (e) => { e.preventDefault(); select("facility_view"); };
+  host.innerHTML = gu ? `<a class="hl genie-link" href="${gu}" target="_blank" rel="noopener" title="Ask Genie" aria-label="Ask Genie"><img src="img/genie.png" alt="Ask Genie"></a>` : "";
 }
 function select(key) {
   CUR = key;
-  $("#nav").querySelectorAll(".nav-item").forEach(b => b.classList.toggle("active", b.getAttribute("data-key") === key));
-  setHeadLinks(key);
+  // Screens outside the menu (Field Map, 3D site view) keep the item you came from highlighted,
+  // so the content bubble always has a menu item to point at.
+  const items = [...$("#nav").querySelectorAll(".nav-item")];
+  if (items.some(b => b.getAttribute("data-key") === key)) items.forEach(b => b.classList.toggle("active", b.getAttribute("data-key") === key));
+  placeTail();
+  setHeadLinks();
   route(key);
 }
+// The content area is drawn as a speech bubble; its tail points at the highlighted menu item.
+function placeTail() {
+  const w = $(".viewwrap"), a = $("#nav .nav-item.active"); if (!w) return;
+  if (!a) { w.style.setProperty("--tail-op", "0"); return; }
+  const y = a.getBoundingClientRect().top + a.offsetHeight / 2 - w.getBoundingClientRect().top;
+  // keep the tail clear of the bubble's rounded corners; hide it only if the item is scrolled out of view
+  w.style.setProperty("--tail-y", Math.round(Math.min(Math.max(y, 26), w.clientHeight - 26)) + "px");
+  w.style.setProperty("--tail-op", y > -10 && y < w.clientHeight + 10 ? "1" : "0");
+}
+window.addEventListener("resize", placeTail);
 function route(key) {
   if (key === "command_centre") return renderCommand();
   if (key === "map") return renderMapScreen();
+  if (key === "impact") return renderImpact();
   if (key === "gas_flow_chain") return renderGasFlowChain();
   if (key === "cross_landscape") return renderCrossLandscape();
   if (key === "facility_view") return renderFacilityView();
   if (key === "weather") return renderWeather();
   if (key === "navigator") return renderNavigator();
-  if (key === "copilot") return renderCopilot();
   if (key === "recommendations") return renderRecommendations();
   if (key === "asset_model") return renderAssetExplorer();
   return renderModule(key);
@@ -912,6 +1158,7 @@ async function loadFreshness() { const f = $("#freshness"); if (!f) return; try 
 async function boot() {
   document.addEventListener("click", e => {
     const th = e.target.closest("th.sortable"); if (th) { sortByTh(th); return; }
+    const wo = e.target.closest("[data-wo-id]"); if (wo) { e.preventDefault(); const row = wo.closest("[data-back]") || wo; openWoDrawer(wo.getAttribute("data-wo-id"), row.getAttribute("data-back")); return; }
     const ac = e.target.closest("td[data-asset-id]"); if (ac) { openAssetDrawer(ac.getAttribute("data-asset-id")); return; }  // asset-id cell wins (item 29)
     const kl = e.target.closest(".kpi[data-list]"); if (kl) { openListDrawer(kl.getAttribute("data-list")); return; }       // tile opens a full list
     const g = e.target.closest("[data-goto]"); if (g) { goTo(g.getAttribute("data-goto")); return; }

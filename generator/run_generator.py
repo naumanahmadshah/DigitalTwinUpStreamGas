@@ -1,4 +1,4 @@
-"""Phase 2 driver — run the generator in a chosen mode (Data-gen 9.8 run modes).
+"""Phase 2 driver: run the generator in a chosen mode (Data-gen 9.8 run modes).
 
   backfill : write ~2 years of history straight to the landing tables (fast, chunked, idempotent).
   batch    : write the reference/transactional/file sources (batch_sources.py).

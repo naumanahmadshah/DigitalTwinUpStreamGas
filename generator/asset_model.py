@@ -1,4 +1,4 @@
-"""Phase 1 — the semantic backbone (the CONTRACT).
+"""Phase 1: the semantic backbone (the CONTRACT).
 
 Builds the reference world deterministically from the seed config (Data-gen Part 9 Layer 1 /
 Design Part 6.1): the ISO-14224 functional-location hierarchy, the asset master, the tag registry
@@ -117,7 +117,7 @@ SIGNAL_SPECS: dict[str, list[tuple]] = {
     ],
 }
 
-# tags whose signal is really an event carrier (safety/fg) — handled by the event emitter too.
+# tags whose signal is really an event carrier (safety/fg): handled by the event emitter too.
 CRITICALITY_TIERS = ["A", "B", "C"]
 
 
@@ -384,3 +384,97 @@ if __name__ == "__main__":
     t = build_semantic_backbone(cfg)
     for k, v in t.items():
         print(f"{k:22s} {len(v):6d} rows")
+
+
+# =============================================================================================
+# Supply network: the physical gas path as directed edges, for impact analysis
+# =============================================================================================
+# The producing formation per basin (one reservoir node per basin the field produces from).
+RESERVOIRS = {
+    "Surat": "Walloon Coal Measures", "Bowen": "Bandanna Coal Measures",
+    "Cooper-Eromanga": "Patchawarra Formation", "Carnarvon": "Mungaroo Formation",
+    "Perth": "Kingia Sandstone", "Gippsland": "Latrobe Group", "Otway": "Waarre Sandstone",
+    "Beetaloo": "Velkerri Shale", "Amadeus": "Pacoota Sandstone",
+}
+
+
+def _reservoir_id(basin: str) -> str:
+    return "RES-" + basin.split("-")[0].upper()          # RES-SURAT, RES-COOPER, RES-BEETALOO ...
+
+
+def supply_network(cfg: dict[str, Any], bb: dict[str, list[dict]]) -> list[dict]:
+    """Directed edges reservoir -> well pad -> gathering hub -> processing train -> compressor ->
+    custody meter -> customer, each with the share of the from-node's outflow that takes the edge.
+
+    Placement mirrors build_semantic_backbone exactly (pads, hubs, trains and meters are assigned to
+    basins by the same round-robin), so the network always agrees with the map. Deterministic.
+    """
+    nb = len(AU_BASINS)
+    geo = {b[0]: (b[1], b[2]) for b in AU_BASINS}
+    names = {r["code"]: r["name"] for r in bb["functional_location"] if r.get("level") == "Area"}
+    wp = cfg["wellpads"]
+    pad_basin = {f"{wp['prefix']}{p:03d}": AU_BASINS[(p - 1) % nb][0] for p in range(1, int(wp["count"]) + 1)}
+    hub_basin = {f"GTH{h + 1:03d}": AU_BASINS[h % nb][0] for h in range(max(1, int(cfg["gathering"].get("hubs", 1))))}
+    train_basins = [AU_BASINS[0], AU_BASINS[2]] + [b for i, b in enumerate(AU_BASINS) if i not in (0, 2)]
+    trains = [t["area"] for t in cfg["cpf"]["trains"]]
+    train_basin = {a: train_basins[i % nb][0] for i, a in enumerate(trains)}
+    meters = [st["area"] for st in cfg["custody"]["stations"]]
+    meter_basin = {a: train_basins[i % nb][0] for i, a in enumerate(meters)}
+
+    def dist(b1, b2):
+        (la1, lo1), (la2, lo2) = geo[b1], geo[b2]
+        return ((la1 - la2) ** 2 + (lo1 - lo2) ** 2) ** 0.5
+
+    edges = []
+
+    def edge(fid, fname, fstop, tid, tname, tstop, share, basin):
+        edges.append({"from_id": fid, "from_name": fname, "from_stop": fstop, "to_id": tid, "to_name": tname,
+                      "to_stop": tstop, "share": round(float(share), 6) if share is not None else None, "basin": basin})
+
+    # reservoir -> pad (the pad's own production decides the split, so share is flow-determined: null)
+    # pad -> hub: every pad ties into one hub in its basin (round-robin when the basin has several)
+    hubs_in = {}
+    for h, b in sorted(hub_basin.items()):
+        hubs_in.setdefault(b, []).append(h)
+    seen = {}
+    for pad, b in sorted(pad_basin.items()):
+        rid = _reservoir_id(b)
+        edge(rid, f"{RESERVOIRS.get(b, b)} ({b} Basin)", "reservoir", pad, names.get(pad, pad), "wells", None, b)
+        hs = hubs_in.get(b) or [min(hub_basin, key=lambda h: dist(hub_basin[h], b))]
+        hub = hs[seen.get(b, 0) % len(hs)]
+        seen[b] = seen.get(b, 0) + 1
+        edge(pad, names.get(pad, pad), "wells", hub, names.get(hub, hub), "gathering", 1.0, b)
+    # hub -> train: the train in the hub's basin, else the nearest train
+    for hub, b in sorted(hub_basin.items()):
+        same = [t for t, tb in train_basin.items() if tb == b]
+        train = same[0] if same else min(train_basin, key=lambda t: dist(train_basin[t], b))
+        edge(hub, names.get(hub, hub), "gathering", train, names.get(train, train), "processing", 1.0, b)
+    # train -> its compressors (parallel units share the train's throughput equally)
+    comps = {}
+    for a in bb["asset_master"]:
+        if a["equipment_type"] == "compressor":
+            comps.setdefault(a["area_code"], []).append(a["asset_id"])
+    split = (cfg.get("network") or {}).get("train_custody") or {}
+    for train in trains:
+        units = sorted(comps.get(train, []))
+        mshare = split.get(train) or {min(meter_basin, key=lambda m: dist(meter_basin[m], train_basin[train])): 1.0}
+        for u in units:
+            edge(train, names.get(train, train), "processing", u, f"{u} compressor", "compression", 1.0 / len(units), train_basin[train])
+            for m, s in sorted(mshare.items()):
+                edge(u, f"{u} compressor", "compression", m, names.get(m, m), "custody", s, train_basin[train])
+    # meter -> customer: each customer takes its weight of the delivery point's sales gas
+    for i, c in enumerate(cfg.get("customers") or []):
+        m = c["delivery_point"]
+        edge(m, names.get(m, m), "custody", customer_id(i), c["name"], "customer", c["weight"], meter_basin.get(m))
+    return edges
+
+
+def customer_id(i: int) -> str:
+    return f"CUS-{i + 1:03d}"
+
+
+def pad_train(edges: list[dict]) -> dict[str, str]:
+    """pad -> processing train it ultimately feeds (via its gathering hub)."""
+    hub_of = {e["from_id"]: e["to_id"] for e in edges if e["from_stop"] == "wells"}
+    train_of = {e["from_id"]: e["to_id"] for e in edges if e["from_stop"] == "gathering"}
+    return {p: train_of[h] for p, h in hub_of.items()}
