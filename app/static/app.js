@@ -401,7 +401,10 @@ async function renderAssetDetail(root, id, opts) {
 }
 
 // Work-order detail (item 29): the WO itself, with a link to its asset and a notifications sublink.
-async function openWoDrawer(woId, backAsset) {
+// showAsset (optional) decides where "back" and the asset link go: opened from the 3D site view's side
+// panel, they close this drawer and show the asset in that panel, so only one asset detail is ever open.
+async function openWoDrawer(woId, backAsset, showAsset) {
+  const toAsset = showAsset || openAssetDrawer;
   if (!woId) return;
   ensureDrawer();
   const wrap = $("#drawerwrap"), dr = $("#assetdrawer");
@@ -424,8 +427,8 @@ async function openWoDrawer(woId, backAsset) {
       ${notifs.length ? `<div class="dr-sec">Notifications on this asset</div><table class="dtbl"><tbody>${notifs.map(n => `<tr><td>${n.notif_id}</td><td>${humanVal(n.notif_type)} ${pill(n.priority)}</td><td>${humanVal(n.status)}</td></tr>`).join("")}</tbody></table>` : `<div class="muted" style="margin-top:12px">No notifications on this asset.</div>`}
     </div>`;
   dr.querySelector(".dr-x").onclick = closeDrawer;
-  const al = dr.querySelector(".drlink[data-asset-id]"); if (al) al.onclick = (e) => { e.preventDefault(); openAssetDrawer(al.getAttribute("data-asset-id")); };
-  const bk = dr.querySelector(".dr-back"); if (bk) bk.onclick = (e) => { e.preventDefault(); openAssetDrawer(backAsset); };
+  const al = dr.querySelector(".drlink[data-asset-id]"); if (al) al.onclick = (e) => { e.preventDefault(); toAsset(al.getAttribute("data-asset-id")); };
+  const bk = dr.querySelector(".dr-back"); if (bk) bk.onclick = (e) => { e.preventDefault(); toAsset(backAsset); };
 }
 // Full notification / failure lists, opened from the KPI tiles (item 29). Rows link to their asset.
 async function openListDrawer(kind) {
@@ -1158,7 +1161,9 @@ async function loadFreshness() { const f = $("#freshness"); if (!f) return; try 
 async function boot() {
   document.addEventListener("click", e => {
     const th = e.target.closest("th.sortable"); if (th) { sortByTh(th); return; }
-    const wo = e.target.closest("[data-wo-id]"); if (wo) { e.preventDefault(); const row = wo.closest("[data-back]") || wo; openWoDrawer(wo.getAttribute("data-wo-id"), row.getAttribute("data-back")); return; }
+    const wo = e.target.closest("[data-wo-id]"); if (wo) { e.preventDefault(); const row = wo.closest("[data-back]") || wo;
+      const in3d = wo.closest("#detail") ? (id) => { closeDrawer(); if ($("#detail").getAttribute("data-asset") !== id || !$("#detail").classList.contains("open")) loadAsset(id); } : null;
+      openWoDrawer(wo.getAttribute("data-wo-id"), row.getAttribute("data-back"), in3d); return; }
     const ac = e.target.closest("td[data-asset-id]"); if (ac) { openAssetDrawer(ac.getAttribute("data-asset-id")); return; }  // asset-id cell wins (item 29)
     const kl = e.target.closest(".kpi[data-list]"); if (kl) { openListDrawer(kl.getAttribute("data-list")); return; }       // tile opens a full list
     const g = e.target.closest("[data-goto]"); if (g) { goTo(g.getAttribute("data-goto")); return; }

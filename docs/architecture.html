@@ -7,7 +7,7 @@
 <style>
   :root{
     --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#f8fafc; --card:#ffffff;
-    --gen:#6d28d9; --land:#475569; --bronze:#b45309; --silver:#6b7280; --gold:#ca8a04; --serve:#059669;
+    --gen:#6d28d9; --land:#475569; --bronze:#b45309; --silver:#6b7280; --gold:#ca8a04; --lake:#2563eb; --serve:#059669;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
@@ -35,7 +35,7 @@
   .arrow{display:flex;align-items:center;justify-content:center;min-width:22px;color:#94a3b8;font-size:24px;font-weight:700;flex:0 0 auto}
 
   .spine{margin:14px 0 0;border:1px dashed #cbd5e1;border-radius:12px;background:#fff;padding:14px 16px;display:flex;gap:14px;align-items:flex-start}
-  .spine .k{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0f172a;color:#e2e8f0;
+  .spine .k{font-family:inherit;background:#0f172a;color:#e2e8f0;
             border-radius:7px;padding:7px 11px;font-size:13px;white-space:nowrap}
   .spine .x{font-size:12.5px;color:var(--muted)}
   .spine .x b{color:var(--ink)}
@@ -52,8 +52,9 @@
 <div class="wrap">
   <h1>Gas Upstream Digital Twin - Architecture</h1>
   <p class="sub">Data flows left to right: synthetic OT and IT sources are generated into Unity Catalog,
-  refined through a bronze - silver - gold medallion (serverless Lakeflow / DLT), and served to a
-  single-page application, a Genie space and an AI/BI dashboard. Every emitter is driven by one seeded
+  refined through a bronze - silver - gold medallion (serverless Lakeflow / DLT). Genie and an AI/BI
+  dashboard read gold in the lakehouse; the gold marts are also synced into Lakebase (Postgres), which
+  is the single-page application's only database. Every emitter is driven by one seeded
   field state, so the marts reconcile across production, reliability, emissions and commercial views.</p>
 
   <div class="legend">
@@ -62,6 +63,7 @@
     <span><i class="dot" style="background:var(--bronze)"></i>Bronze (raw)</span>
     <span><i class="dot" style="background:var(--silver)"></i>Silver (conformed)</span>
     <span><i class="dot" style="background:var(--gold)"></i>Gold (curated marts)</span>
+    <span><i class="dot" style="background:var(--lake)"></i>Lakebase (app database)</span>
     <span><i class="dot" style="background:var(--serve)"></i>Serving and consumption</span>
   </div>
 
@@ -90,10 +92,10 @@
         <div class="d">Raw inputs in Unity Catalog</div>
       </div>
       <div class="body" style="--ac:var(--land)">
-        <div class="card"><div class="ct">Streaming landing tables</div><div class="cd"><code>land_telemetry</code>, <code>land_events</code> (Delta, append).</div></div>
-        <div class="card"><div class="ct">Source snapshots</div><div class="cd"><code>src_*</code> CDC/batch tables for EAM, PA, HR, HSE, spares, customers, supply network.</div></div>
+        <div class="card"><div class="ct">Streaming landing tables</div><div class="cd">land_telemetry, land_events (Delta, append).</div></div>
+        <div class="card"><div class="ct">Source snapshots</div><div class="cd">src_* CDC/batch tables for EAM, PA, HR, HSE, spares, customers, supply network.</div></div>
         <div class="card"><div class="ct">Backbone tables</div><div class="cd">tag registry, asset / functional-location / well master, PVT, id crossmap.</div></div>
-        <div class="card"><div class="ct">Landing volume</div><div class="cd"><code>/Volumes/.../landing</code>: CSV + JSON files for Auto Loader.</div></div>
+        <div class="card"><div class="ct">Landing volume</div><div class="cd">/Volumes/.../landing: CSV + JSON files for Auto Loader.</div></div>
       </div>
     </div>
 
@@ -135,7 +137,7 @@
     <div class="stage">
       <div class="cap" style="background:var(--gold)">
         <div class="n">Step 5</div><div class="t">Gold marts</div>
-        <div class="d">The serving layer &middot; 35 marts (Genie reads these only)</div>
+        <div class="d">The serving layer &middot; 41 marts (Genie and the dashboard read these)</div>
       </div>
       <div class="body" style="--ac:var(--gold)">
         <div class="card"><div class="ct">Production and constraint</div><div class="cd">field production, well scorecard, plant KPI, asset state, constraint ranking, flow assurance, custody.</div></div>
@@ -143,6 +145,23 @@
         <div class="card"><div class="ct">Emissions and sustainability</div><div class="cd">emissions ledger, carbon compliance, methane LDAR, produced water, energy efficiency.</div></div>
         <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, margin, capital plan, deferment, lab, weather; supply network, customer supply (impact analysis).</div></div>
         <div class="card"><div class="ct">Predictive and advisory</div><div class="cd">remaining useful life, liquid-loading risk, production forecast, recommendations.</div></div>
+        <div class="card"><div class="ct">App-serving backbone</div><div class="cd">tag context, asset master, functional locations, sites, per-asset signal series, safety events.</div></div>
+      </div>
+    </div>
+
+    <div class="arrow">&rsaquo;</div>
+
+    <!-- 6. Lakebase -->
+    <div class="stage">
+      <div class="cap" style="background:var(--lake)">
+        <div class="n">Step 6</div><div class="t">Lakebase</div>
+        <div class="d">The app's only database &middot; scales to zero</div>
+      </div>
+      <div class="body" style="--ac:var(--lake)">
+        <div class="card"><div class="ct">Synced tables</div><div class="cd">every gold mart the app reads, as a Postgres table of the same name (schema digital_twin_app), in one sync pipeline.</div></div>
+        <div class="card"><div class="ct">Kept fresh</div><div class="cd">synced right after each medallion load, then every 5 minutes by the &ldquo;Lakebase sync&rdquo; job; unchanged marts are skipped.</div></div>
+        <div class="card"><div class="ct">Write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions here (audited).</div></div>
+        <div class="card"><div class="ct">Autoscaling</div><div class="cd">0.5 to 4 CU; the compute suspends after 5 idle minutes and wakes on the next request.</div></div>
       </div>
     </div>
 
@@ -151,14 +170,13 @@
     <!-- 6. Serving -->
     <div class="stage">
       <div class="cap" style="background:var(--serve)">
-        <div class="n">Step 6</div><div class="t">Serving and consumption</div>
+        <div class="n">Step 7</div><div class="t">Serving and consumption</div>
         <div class="d">How users and agents access it</div>
       </div>
       <div class="body" style="--ac:var(--serve)">
-        <div class="card"><div class="ct">Digital twin app</div><div class="cd">FastAPI + single-page UI: Command Centre, maps, 3D sites, analytics and reservoir-to-customer impact analysis (with PDF export).</div></div>
-        <div class="card"><div class="ct">Genie space</div><div class="cd">&ldquo;Asset Intelligence Genie&rdquo;: natural-language analytics over the gold marts only, opened in Databricks One.</div></div>
-        <div class="card"><div class="ct">AI/BI dashboard</div><div class="cd">published summary of production, reliability and emissions.</div></div>
-        <div class="card"><div class="ct">Lakebase write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions to a Postgres instance (audited).</div></div>
+        <div class="card"><div class="ct">Databricks Asset Atlas app (from Lakebase)</div><div class="cd">FastAPI + single-page UI: Command Centre, maps, site views, analytics and reservoir-to-customer impact analysis (with PDF export). Reads and writes Lakebase only.</div></div>
+        <div class="card"><div class="ct">Genie space (from gold)</div><div class="cd">&ldquo;Asset Intelligence Genie&rdquo;: natural-language analytics over the gold marts only, opened in Databricks One.</div></div>
+        <div class="card"><div class="ct">AI/BI dashboard (from gold)</div><div class="cd">published summary of production, reliability and emissions.</div></div>
       </div>
     </div>
 
@@ -166,17 +184,17 @@
 
   <div class="spine">
     <div class="k">AREA-SYSTEM-CLASS-NNNN</div>
-    <div class="x"><b>One join key ties it all together.</b> Every tag id (for example <code>CPF002-CMP-AT-1018</code>)
+    <div class="x"><b>One join key ties it all together:</b><br>Every tag id (for example CPF002-CMP-AT-1018)
       decodes to its area, system and equipment class, and resolves through the backbone to its asset,
       functional location, live value and its ids in every other system (PI historian, EAM, OSDU, P&amp;ID).
       The app's <b>Asset &amp; Document Explorer</b> demonstrates this resolution live.</div>
   </div>
 
   <div class="notes">
-    <div class="note"><h4>Compute</h4><p>Everything runs on serverless: the generation job, the Lakeflow medallion pipeline, the SQL warehouse behind the app / Genie / dashboard, and the Lakebase instance.</p></div>
-    <div class="note"><h4>Governance</h4><p>All objects live in one Unity Catalog catalog and schema. Tables and columns carry COMMENTs; the app service principal is granted read access on the schema.</p></div>
-    <div class="note"><h4>Parameterized</h4><p>Catalog, schema, warehouse and Lakebase instance are bundle variables, so one asset bundle deploys to any workspace with a single command.</p></div>
-    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the header Genie link is simply hidden; without Lakebase the recommendation inbox is read-only. The core twin still serves.</p></div>
+    <div class="note"><h4>Compute</h4><p>Everything runs on serverless: the generation job, the Lakeflow medallion pipeline, the Lakebase sync pipeline, the SQL warehouse behind Genie and the dashboard, and Lakebase Autoscaling behind the app.</p></div>
+    <div class="note"><h4>Governance</h4><p>All lakehouse objects live in one Unity Catalog catalog and schema, and the synced tables in a sibling schema. Tables and columns carry COMMENTs; the app service principal is granted read on the synced marts and read/write on the write-back tables in Lakebase.</p></div>
+    <div class="note"><h4>Parameterized</h4><p>Catalog, schema, warehouse, Lakebase project and the sync schedule are bundle variables, so one asset bundle deploys to any workspace with a single command.</p></div>
+    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the header Genie link is simply hidden; the app, Genie and the dashboard are independent surfaces over the same gold.</p></div>
   </div>
 
   <footer>Gas Upstream Digital Twin &middot; bronze - silver - gold on Databricks &middot; see README.md for deployment</footer>

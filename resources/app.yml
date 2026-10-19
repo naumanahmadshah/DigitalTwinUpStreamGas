@@ -1,21 +1,18 @@
 # Databricks App: the FastAPI backend + single-page UI for the twin.
-# The app reads the gold marts through the SQL warehouse and writes recommendation decisions to
-# Lakebase. app.yaml (rendered from app.yaml.tmpl by the deploy script) supplies the catalog,
-# schema, Lakebase host and Genie space id as environment variables.
+# The app's ONLY database is Lakebase: it reads the gold marts from their Lakebase synced copies and
+# writes recommendation decisions back to Lakebase. It does not use a SQL warehouse. app.yaml (rendered
+# from app.yaml.tmpl by the deploy script) supplies the Postgres schema, the Lakebase endpoint and the
+# Genie space id as environment variables.
 # source_code_path is relative to this file (resources/), hence ../app.
 resources:
   apps:
     app:
       name: ${var.app_name}
-      description: "Gas Upstream Digital Twin: Command Centre, field map, value-chain and cross-landscape tabs, 3D navigator, a link to the Genie space and a human-in-the-loop recommendation inbox."
+      description: "Gas Upstream Digital Twin: Command Centre, maps, value-chain and Analytics tabs, 3D site view, impact analysis, a link to the Genie space and a human-in-the-loop recommendation inbox. Served from Lakebase."
       source_code_path: ../app
       resources:
-        - name: "warehouse"
-          sql_warehouse:
-            id: ${var.warehouse_id}
-            permission: "CAN_USE"
         - name: "lakebase"
-          database:
-            instance_name: ${var.db_instance}
-            database_name: "databricks_postgres"
+          postgres:
+            branch: projects/${var.lakebase_project}/branches/production
+            database: projects/${var.lakebase_project}/branches/production/databases/databricks-postgres
             permission: "CAN_CONNECT_AND_CREATE"

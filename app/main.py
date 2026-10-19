@@ -1,9 +1,11 @@
 """Upstream Gas Digital Twin v2: App backend (Design Part 3).
 
-Serves the single-pane twin over the curated GOLD marts (via the SQL warehouse) and the Lakebase
-write-back tables. Organised around the physical value chain: Command Centre + Map + one tab per
-value-chain stop + Cross-Cutting + Others, with a link out to the Genie space and a human-in-the-loop
-Recommendation Inbox on every screen. MV-only: routes issue plain SELECTs; all logic is in the marts.
+Serves the single-pane twin from Lakebase, the App's only database: the curated GOLD marts arrive there as
+Lakebase synced tables (Postgres schema TWIN_PG_SCHEMA, one table per mart, same name), and recommendation
+decisions are written back to Lakebase. Genie and the AI/BI dashboard read the same gold marts in the
+lakehouse. Organised around the physical value chain: Command Centre + maps + one tab per value-chain stop +
+Analytics, with a link out to the Genie space and a human-in-the-loop Recommendation Inbox.
+MV-only: the marts carry the logic; routes issue plain SELECTs over them.
 """
 from __future__ import annotations
 import concurrent.futures as _cf
@@ -13,17 +15,17 @@ import threading
 import time as _time
 from decimal import Decimal
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from databricks import sql as dbsql
-from databricks.sdk.core import Config
+from databricks.sdk import WorkspaceClient
 
-CATALOG = os.environ["TWIN_CATALOG"]
 SCHEMA = os.environ["TWIN_SCHEMA"]
-WAREHOUSE_ID = os.environ["DATABRICKS_WAREHOUSE_ID"]
-DB_INSTANCE = os.environ.get("TWIN_DB_INSTANCE")
-PGHOST = os.environ.get("TWIN_PGHOST")
+PG_SCHEMA = os.environ.get("TWIN_PG_SCHEMA") or f"{SCHEMA}_app"   # where the synced gold marts land
+PG_ENDPOINT = os.environ["TWIN_PG_ENDPOINT"]                       # projects/<id>/branches/<id>/endpoints/<id>
+PGHOST = os.environ.get("PGHOST") or os.environ.get("TWIN_PGHOST")  # PGHOST/PGUSER/PGDATABASE come from the app's Lakebase resource
+PGDATABASE = os.environ.get("PGDATABASE") or "databricks_postgres"
 GENIE_SPACE = os.environ.get("TWIN_GENIE_SPACE")  # optional; set post-deploy for the header Genie link
 
 app = FastAPI(title="Upstream Gas Digital Twin v2")
@@ -38,45 +40,81 @@ async def _no_stale_ui(request: Request, call_next):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
 
-# Connection POOL + concurrent query execution. The warehouse per-query round-trip is ~0.3-0.5s, so a
-# screen that fires ~9 queries one-by-one on a single shared connection took 3-5s. A small pool lets a
-# screen run its queries concurrently (qmany), cutting a tab load to ~1s.
+# Lakebase connection POOL + concurrent query execution: a screen runs its queries side by side (qmany).
+# Lakebase signs in with a short-lived OAuth token, so the token is refreshed every 30 minutes and pooled
+# connections are recycled after 40. The compute scales to zero when idle: the first query after a pause
+# wakes it, and a connection broken by the pause is dropped and retried once on a fresh one. Pooled
+# connections idle for more than 90 seconds are closed, because an open connection keeps the compute awake.
 _pool: list = []
 _pool_lock = threading.Lock()
 _MAXPOOL = 8
+_CONN_MAX_AGE = 40 * 60
+_CONN_MAX_IDLE = 90
 _cache: dict = {}
+_tok = {"v": None, "t": 0.0}
+_tok_lock = threading.Lock()
+_ws = None
 
 
 def T(name):
-    return f"`{CATALOG}`.`{SCHEMA}`.{name}"
+    return f'"{PG_SCHEMA}".{name}'
 
 
 def _coerce(v):
     if isinstance(v, Decimal):
         return float(v)
+    if isinstance(v, _dt.datetime) and v.tzinfo is not None:
+        v = v.astimezone(_dt.timezone.utc)   # UTC, as the lakehouse returned it
     if isinstance(v, (_dt.date, _dt.datetime)):
         return v.isoformat()
     return v
 
 
+def _client():
+    global _ws
+    if _ws is None:
+        _ws = WorkspaceClient()
+    return _ws
+
+
+def _token():
+    with _tok_lock:
+        if _tok["v"] is None or _time.time() - _tok["t"] > 30 * 60:
+            _tok["v"] = _client().api_client.do("POST", "/api/2.0/postgres/credentials", body={"endpoint": PG_ENDPOINT})["token"]
+            _tok["t"] = _time.time()
+        return _tok["v"]
+
+
+def _pg_user():
+    return os.environ.get("PGUSER") or os.environ.get("DATABRICKS_CLIENT_ID") or _client().current_user.me().user_name
+
+
 def _new_conn():
-    cfg = Config()
-    return dbsql.connect(server_hostname=cfg.host.replace("https://", ""),
-                         http_path=f"/sql/1.0/warehouses/{WAREHOUSE_ID}",
-                         credentials_provider=lambda: cfg.authenticate)
+    c = psycopg.connect(host=PGHOST, port=int(os.environ.get("PGPORT") or 5432), dbname=PGDATABASE,
+                        user=_pg_user(), password=_token(), sslmode="require", autocommit=True,
+                        connect_timeout=30, application_name="gas-upstream-twin")
+    c._born = _time.time()
+    return c
 
 
 def _acquire():
     with _pool_lock:
-        if _pool:
-            return _pool.pop()
+        while _pool:
+            c = _pool.pop()
+            if not c.closed and _time.time() - getattr(c, "_born", 0) < _CONN_MAX_AGE:
+                return c
+            try:
+                c.close()
+            except Exception:
+                pass
     return _new_conn()
 
 
 def _release(c, ok=True):
     if c is None:
         return
-    if ok:
+    if ok and not c.closed:
+        c._used = _time.time()
         with _pool_lock:
             if len(_pool) < _MAXPOOL:
                 _pool.append(c)
@@ -87,26 +125,45 @@ def _release(c, ok=True):
         pass
 
 
+def _reap_idle():
+    """Close pooled connections nobody has used for _CONN_MAX_IDLE seconds, so Lakebase can scale to zero."""
+    while True:
+        _time.sleep(30)
+        now = _time.time()
+        with _pool_lock:
+            stale = [c for c in _pool if now - getattr(c, "_used", 0) > _CONN_MAX_IDLE]
+            _pool[:] = [c for c in _pool if c not in stale]
+        for c in stale:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+threading.Thread(target=_reap_idle, daemon=True, name="pg-idle-reaper").start()
+
+
 def q(statement, params=None):
     for attempt in (1, 2):
-        c = _acquire()
+        c = None
         try:
-            cur = c.cursor()
-            try:
-                cur.execute(statement, params or {})
+            c = _acquire()
+            with c.cursor() as cur:
+                cur.execute(statement, params or None)
                 if cur.description is None:
                     rows = []
                 else:
-                    cols = [d[0] for d in cur.description]
+                    cols = [d.name for d in cur.description]
                     rows = [{col: _coerce(v) for col, v in zip(cols, r)} for r in cur.fetchall()]
-            finally:
-                cur.close()
             _release(c, True)
             return rows
-        except Exception:
-            _release(c, ok=False)   # drop a broken connection; next acquire makes a fresh one
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            _release(c, ok=False)   # drop a broken connection (e.g. the compute scaled to zero); retry on a fresh one
             if attempt == 2:
                 raise
+        except Exception:
+            _release(c, ok=False)
+            raise
 
 
 def qmany(items):
@@ -129,6 +186,16 @@ def _scalar(statement):
     return _sv(q(statement))
 
 
+def _since(table, col="gas_day", days=61):
+    """WHERE fragment: rows within `days` of the latest day in `table` (day columns may be DATE or ISO text)."""
+    return f"{col}::date >= (SELECT MAX({col})::date FROM {table}) - {days}"
+
+
+def _month(col="gas_day"):
+    """The YYYY-MM month of a DATE or ISO-text day column."""
+    return f"left({col}::text, 7)"
+
+
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
@@ -143,7 +210,7 @@ def _fmt_day(s):
 def _data_period():
     """The actual date span of the field data, so period-summed tiles can state their period (item 23)."""
     def f():
-        r = q(f"SELECT MIN(gas_day) a, MAX(gas_day) b, DATEDIFF(MAX(gas_day), MIN(gas_day)) + 1 n FROM {T('gld_field_production')}")
+        r = q(f"SELECT MIN(gas_day) a, MAX(gas_day) b, MAX(gas_day)::date - MIN(gas_day)::date + 1 n FROM {T('gld_field_production')}")
         if r and r[0].get("a"):
             return f"{_fmt_day(r[0]['a'])} to {_fmt_day(r[0]['b'])} ({r[0]['n']} days)"
         return None
@@ -158,29 +225,6 @@ def cached(key, ttl, fn):
     val = fn()
     _cache[key] = (now, val)
     return val
-
-
-# ============================ Lakebase (write-back) ==========================================
-_pg = None
-
-
-def _lakebase_ok():
-    return bool(DB_INSTANCE and PGHOST)
-
-
-def _pg_conn():
-    global _pg
-    if _pg is not None and not _pg.closed:
-        return _pg
-    import psycopg
-    from databricks.sdk import WorkspaceClient
-    w = WorkspaceClient()
-    user = os.environ.get("DATABRICKS_CLIENT_ID") or w.current_user.me().user_name
-    tok = w.api_client.do("POST", "/api/2.0/database/credentials",
-                          body={"request_id": "twinv2-app", "instance_names": [DB_INSTANCE]})["token"]
-    _pg = psycopg.connect(host=PGHOST, port=5432, dbname="databricks_postgres",
-                          user=user, password=tok, sslmode="require", autocommit=True)
-    return _pg
 
 
 # ============================ Navigation / modules ===========================================
@@ -392,14 +436,14 @@ def _specs():
                      ("CSG wells", f"SELECT COUNT(DISTINCT well_id) v FROM {m('gld_well_scorecard')} WHERE completion_type='csg'"),
                      ("Mean utilization (%)", f"SELECT ROUND(AVG(utilization_pct),1) v FROM {m('gld_well_scorecard')}"),
                      ("Wells on liquid-loading watch", f"SELECT COUNT(*) v FROM {m('gld_pred_liquid_loading')} WHERE liquid_loading_watch='watch'"),
-                     ("Wells SSSV not passed", f"SELECT COUNT(*) v FROM (SELECT sssv_status, ROW_NUMBER() OVER (PARTITION BY well_id ORDER BY gas_day DESC) rn FROM {m('gld_well_scorecard')}) WHERE rn=1 AND sssv_status='not_passed'")],
+                     ("Wells SSSV not passed", f"SELECT COUNT(*) v FROM (SELECT sssv_status, ROW_NUMBER() OVER (PARTITION BY well_id ORDER BY gas_day DESC NULLS LAST) rn FROM {m('gld_well_scorecard')}) WHERE rn=1 AND sssv_status='not_passed'")],
             "charts": [("Reservoir pressure trend (kPa)", "line", "gas_day", "tubing_pressure",
                         f"SELECT gas_day, ROUND(AVG(tubing_pressure),0) tubing_pressure FROM {m('gld_well_scorecard')} GROUP BY gas_day ORDER BY gas_day"),
                        ("Produced by well (10³ m³)", "bar", "well_id", "produced",
                         f"SELECT well_id, ROUND(SUM(produced_e3m3),1) produced FROM {m('gld_well_scorecard')} GROUP BY well_id ORDER BY well_id", {"color": "lowbad"})],
             "tables": [(f"SELECT well_id, completion_type, lift_type, ROUND(AVG(utilization_pct),1) utilization_pct FROM {m('gld_well_scorecard')} GROUP BY well_id, completion_type, lift_type ORDER BY utilization_pct LIMIT 500",
                         ["well_id", "completion_type", "lift_type", "utilization_pct"], "Wells by utilization (lowest first)"),
-                       (f"SELECT well_id, pad_area, lift_type, ROUND(risk_score,2) risk_score, liquid_loading_watch, ROUND(gas_upside_e3m3,1) gas_upside_e3m3 FROM {m('gld_pred_liquid_loading')} ORDER BY risk_score DESC LIMIT 500",
+                       (f"SELECT well_id, pad_area, lift_type, ROUND(risk_score,2) risk_score, liquid_loading_watch, ROUND(gas_upside_e3m3,1) gas_upside_e3m3 FROM {m('gld_pred_liquid_loading')} ORDER BY risk_score DESC NULLS LAST LIMIT 500",
                         ["well_id", "pad_area", "lift_type", "risk_score", "liquid_loading_watch", "gas_upside_e3m3"], "Liquid-loading watchlist (ranked by risk)")],
         },
         "gathering": {
@@ -446,7 +490,7 @@ def _specs():
                      ("Metering stations", f"SELECT COUNT(DISTINCT asset_id) v FROM {m('gld_custody_allocation')}")],
             "charts": [("UAF trend (%)", "line", "gas_day", "uaf",
                         f"SELECT gas_day, ROUND(AVG(uaf_pct),2) uaf FROM {m('gld_custody_allocation')} GROUP BY gas_day ORDER BY gas_day")],
-            "table": (f"SELECT asset_id, gas_day, ROUND(metered_e3m3,1) metered_e3m3, ROUND(uaf_e3m3,1) uaf_e3m3, ROUND(uaf_pct,2) uaf_pct FROM {m('gld_custody_allocation')} ORDER BY gas_day DESC LIMIT 30",
+            "table": (f"SELECT asset_id, gas_day, ROUND(metered_e3m3,1) metered_e3m3, ROUND(uaf_e3m3,1) uaf_e3m3, ROUND(uaf_pct,2) uaf_pct FROM {m('gld_custody_allocation')} ORDER BY gas_day DESC NULLS LAST LIMIT 30",
                       ["asset_id", "gas_day", "metered_e3m3", "uaf_e3m3", "uaf_pct"], "Custody reconciliation"),
         },
         "integrity": {
@@ -467,8 +511,8 @@ def _specs():
                      ("Alarms (all time)", f"SELECT SUM(alarm_count) v FROM {m('gld_safety_alarms')}"),
                      ("Critical events", f"SELECT SUM(critical_events) v FROM {m('gld_safety_alarms')}")],
             "charts": [("ESD trips by area", "bar", "area_code", "trips",
-                        f"SELECT area_code, SUM(esd_trips) trips FROM {m('gld_safety_alarms')} GROUP BY area_code HAVING trips>0 ORDER BY area_code")],
-            "table": (f"SELECT event_time, CASE event_type WHEN 'esd_trip' THEN 'ESD trip' WHEN 'fg_detection' THEN 'F&G detection' WHEN 'emission_exceedance' THEN 'Emission exceedance' ELSE 'Critical alarm' END event, asset_id, area_code, equipment_type, severity FROM {m('slv_safety_events')} WHERE event_type IN ('esd_trip','fg_detection','emission_exceedance') OR severity='critical' ORDER BY event_time DESC LIMIT 200",
+                        f"SELECT area_code, SUM(esd_trips) trips FROM {m('gld_safety_alarms')} GROUP BY area_code HAVING SUM(esd_trips)>0 ORDER BY area_code")],
+            "table": (f"SELECT event_time, event, asset_id, area_code, equipment_type, severity FROM {m('gld_safety_events')} ORDER BY event_time DESC NULLS LAST LIMIT 200",
                       ["event_time", "event", "asset_id", "area_code", "equipment_type", "severity"], "Recent safety events (click a row for the asset)"),
         },
         "emissions": {
@@ -482,7 +526,7 @@ def _specs():
                         f"SELECT gas_day, ROUND(SUM(co2_kg)/NULLIF(MAX(field_e3m3),0),2) ci FROM {m('gld_emissions_ledger')} GROUP BY gas_day ORDER BY gas_day"),
                        ("CH4 by source (kg)", "bar", "source", "ch4",
                         f"SELECT CASE WHEN equipment_type='compressor' THEN 'Compression' WHEN equipment_type='teg_dehydration' THEN 'Dehydration' WHEN equipment_type='utilities' THEN 'Utilities' WHEN equipment_type='flare' THEN 'Flare' ELSE 'Other' END source, ROUND(SUM(ch4_kg),0) ch4 FROM {m('gld_emissions_ledger')} WHERE ch4_kg>0 GROUP BY 1 ORDER BY 1")],
-            "table": (f"SELECT gas_day, asset_id, ROUND(ch4_kg,1) ch4_kg, ROUND(co2_kg,0) co2_kg, ROUND(nox_kg,1) nox_kg FROM {m('gld_emissions_ledger')} ORDER BY gas_day DESC, co2_kg DESC LIMIT 30",
+            "table": (f"SELECT gas_day, asset_id, ROUND(ch4_kg,1) ch4_kg, ROUND(co2_kg,0) co2_kg, ROUND(nox_kg,1) nox_kg FROM {m('gld_emissions_ledger')} ORDER BY gas_day DESC NULLS LAST, co2_kg DESC NULLS LAST LIMIT 30",
                       ["gas_day", "asset_id", "ch4_kg", "co2_kg", "nox_kg"], "Emissions ledger"),
         },
         "deferment": {
@@ -495,7 +539,7 @@ def _specs():
                         f"SELECT cause_desc, ROUND(SUM(deferred_e3m3),0) dv FROM {m('gld_deferment')} GROUP BY cause_desc ORDER BY cause_desc"),
                        ("Deferment dollars by day", "line", "gas_day", "dollars",
                         f"SELECT gas_day, ROUND(SUM(deferred_dollars),0) dollars FROM {m('gld_deferment')} GROUP BY gas_day ORDER BY gas_day")],
-            "table": (f"SELECT cause_desc, asset_id, ROUND(SUM(deferred_e3m3),1) deferred_e3m3, ROUND(SUM(deferred_dollars),0) deferred_dollars FROM {m('gld_deferment')} GROUP BY cause_desc, asset_id ORDER BY deferred_dollars DESC LIMIT 30",
+            "table": (f"SELECT cause_desc, asset_id, ROUND(SUM(deferred_e3m3),1) deferred_e3m3, ROUND(SUM(deferred_dollars),0) deferred_dollars FROM {m('gld_deferment')} GROUP BY cause_desc, asset_id ORDER BY deferred_dollars DESC NULLS LAST LIMIT 30",
                       ["cause_desc", "asset_id", "deferred_e3m3", "deferred_dollars"], "Deferment by cause and asset"),
         },
         "economics": {
@@ -506,7 +550,7 @@ def _specs():
                      ("Carbon cost ($)", f"SELECT ROUND(SUM(carbon_cost_dollars),0) v FROM {m('gld_economics')}")],
             "charts": [("Revenue by day ($)", "line", "gas_day", "rev",
                         f"SELECT gas_day, ROUND(SUM(revenue_dollars),0) rev FROM {m('gld_economics')} GROUP BY gas_day ORDER BY gas_day")],
-            "table": (f"SELECT asset_id, area_code, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(deferred_dollars),0) deferred_dollars, ROUND(SUM(carbon_cost_dollars),0) carbon_cost_dollars FROM {m('gld_economics')} GROUP BY asset_id, area_code ORDER BY revenue_dollars DESC LIMIT 500",
+            "table": (f"SELECT asset_id, area_code, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(deferred_dollars),0) deferred_dollars, ROUND(SUM(carbon_cost_dollars),0) carbon_cost_dollars FROM {m('gld_economics')} GROUP BY asset_id, area_code ORDER BY revenue_dollars DESC NULLS LAST LIMIT 500",
                       ["asset_id", "area_code", "revenue_dollars", "deferred_dollars", "carbon_cost_dollars"], "Economics by asset"),
         },
         "maintenance": {
@@ -524,9 +568,9 @@ def _specs():
                         f"SELECT CASE WHEN status IN ('open','in_progress') THEN 'Open' WHEN status='completed' THEN 'Completed' WHEN status='rejected' THEN 'Rejected' ELSE initcap(status) END state, COUNT(*) n FROM {m('gld_workorders')} GROUP BY 1 ORDER BY 1"),
                        ("Failures by failure mode", "bar", "iso14224_code", "n",
                         f"SELECT iso14224_code, COUNT(*) n FROM {m('gld_failure_history')} GROUP BY iso14224_code ORDER BY iso14224_code")],
-            "tables": [(f"SELECT wo_id, asset_id, wo_type, assigned_to, target_completion, status, priority, created_date, ROUND(cost,0) cost FROM {m('gld_workorders')} ORDER BY created_date DESC LIMIT 1000",
+            "tables": [(f"SELECT wo_id, asset_id, wo_type, assigned_to, target_completion, status, priority, created_date, ROUND(cost,0) cost FROM {m('gld_workorders')} ORDER BY created_date DESC NULLS LAST LIMIT 1000",
                         ["wo_id", "asset_id", "wo_type", "assigned_to", "target_completion", "status", "priority", "created_date", "cost"], "Work orders (EAM)"),
-                       (f"SELECT asset_id, equipment_type, open_wos, completed_wos, failures, ROUND(wo_cost,0) wo_cost FROM {m('gld_maintenance_reliability')} WHERE open_wos>0 ORDER BY open_wos DESC LIMIT 500",
+                       (f"SELECT asset_id, equipment_type, open_wos, completed_wos, failures, ROUND(wo_cost,0) wo_cost FROM {m('gld_maintenance_reliability')} WHERE open_wos>0 ORDER BY open_wos DESC NULLS LAST LIMIT 500",
                         ["asset_id", "equipment_type", "open_wos", "completed_wos", "failures", "wo_cost"], "Maintenance backlog")],
         },
         "workorders": {
@@ -540,7 +584,7 @@ def _specs():
                         f"SELECT CASE WHEN status IN ('open','in_progress') THEN 'Open' WHEN status='completed' THEN 'Completed' WHEN status='rejected' THEN 'Rejected' ELSE initcap(status) END state, COUNT(*) n FROM {m('gld_workorders')} GROUP BY 1 ORDER BY 1"),
                        ("Failures by failure mode", "bar", "iso14224_code", "n",
                         f"SELECT iso14224_code, COUNT(*) n FROM {m('gld_failure_history')} GROUP BY iso14224_code ORDER BY iso14224_code")],
-            "table": (f"SELECT wo_id, asset_id, wo_type, assigned_to, target_completion, status, priority, created_date, ROUND(cost,0) cost FROM {m('gld_workorders')} ORDER BY created_date DESC LIMIT 1000",
+            "table": (f"SELECT wo_id, asset_id, wo_type, assigned_to, target_completion, status, priority, created_date, ROUND(cost,0) cost FROM {m('gld_workorders')} ORDER BY created_date DESC NULLS LAST LIMIT 1000",
                       ["wo_id", "asset_id", "wo_type", "assigned_to", "target_completion", "status", "priority", "created_date", "cost"], "Work orders (EAM)"),
         },
         "lab": {
@@ -552,46 +596,46 @@ def _specs():
                      ("Max H2S (ppm)", f"SELECT ROUND(MAX(h2s_ppm),0) v FROM {m('gld_lab_assay')}")],
             "charts": [("CO₂ by sample point (Mol %)", "bar", "sample_point", "co2",
                         f"SELECT sample_point, ROUND(AVG(co2_molpct),2) co2 FROM {m('gld_lab_assay')} GROUP BY sample_point ORDER BY sample_point")],
-            "table": (f"SELECT asset_id, sample_id, sample_point, well_id, sample_date, c1_molpct, co2_molpct, n2_molpct, h2s_ppm, water_ppm, oil_in_water_ppm FROM {m('gld_lab_assay')} ORDER BY sample_date DESC LIMIT 500",
+            "table": (f"SELECT asset_id, sample_id, sample_point, well_id, sample_date, c1_molpct, co2_molpct, n2_molpct, h2s_ppm, water_ppm, oil_in_water_ppm FROM {m('gld_lab_assay')} ORDER BY sample_date DESC NULLS LAST LIMIT 500",
                       ["asset_id", "sample_id", "sample_point", "well_id", "sample_date", "c1_molpct", "co2_molpct", "n2_molpct", "h2s_ppm", "water_ppm", "oil_in_water_ppm"], "Recent lab assays"),
         },
         "commercial": {
             "title": "Commercial & Prices", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Commercial context: the sales-gas price the operator sells at and the market carbon price; contractual nominations vs delivery; and the money: cost of generation, sale revenue and profit.",
-            "kpis": [("Sale revenue (last month $)", f"SELECT ROUND(SUM(revenue_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
-                     ("Cost of generation (last month $)", f"SELECT ROUND(SUM(lifting_cost_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
-                     ("Profit (last month $)", f"SELECT ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
-                     ("Carbon cost (last month $)", f"SELECT ROUND(SUM(carbon_cost_dollars),0) v FROM {m('gld_economics')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_economics')})"),
-                     ("Water disposal (last month $)", f"SELECT ROUND(SUM(disposal_cost_dollars),0) v FROM {m('gld_produced_water')} WHERE date_format(gas_day,'yyyy-MM')=(SELECT MAX(date_format(gas_day,'yyyy-MM')) FROM {m('gld_produced_water')})"),
-                     ("Latest sales gas price ($/GJ)", f"SELECT ROUND(gas_price_gj,2) v FROM {m('gld_commercial')} ORDER BY gas_day DESC LIMIT 1"),
-                     ("Avg delivery vs nomination (%)", f"SELECT ROUND(AVG(nomination_delivery_pct),1) v FROM {m('gld_commercial')} WHERE gas_day >= DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_commercial')}),61)")],
+            "kpis": [("Sale revenue (last month $)", f"SELECT ROUND(SUM(revenue_dollars),0) v FROM {m('gld_economics')} WHERE {_month()}=(SELECT MAX({_month()}) FROM {m('gld_economics')})"),
+                     ("Cost of generation (last month $)", f"SELECT ROUND(SUM(lifting_cost_dollars),0) v FROM {m('gld_economics')} WHERE {_month()}=(SELECT MAX({_month()}) FROM {m('gld_economics')})"),
+                     ("Profit (last month $)", f"SELECT ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) v FROM {m('gld_economics')} WHERE {_month()}=(SELECT MAX({_month()}) FROM {m('gld_economics')})"),
+                     ("Carbon cost (last month $)", f"SELECT ROUND(SUM(carbon_cost_dollars),0) v FROM {m('gld_economics')} WHERE {_month()}=(SELECT MAX({_month()}) FROM {m('gld_economics')})"),
+                     ("Water disposal (last month $)", f"SELECT ROUND(SUM(disposal_cost_dollars),0) v FROM {m('gld_produced_water')} WHERE {_month()}=(SELECT MAX({_month()}) FROM {m('gld_produced_water')})"),
+                     ("Latest sales gas price ($/GJ)", f"SELECT ROUND(gas_price_gj,2) v FROM {m('gld_commercial')} ORDER BY gas_day DESC NULLS LAST LIMIT 1"),
+                     ("Avg delivery vs nomination (%)", f"SELECT ROUND(AVG(nomination_delivery_pct),1) v FROM {m('gld_commercial')} WHERE {_since(m('gld_commercial'), 'gas_day', 61)}")],
             "charts": [("Monthly revenue, cost of generation & profit ($M)", "line", "month", "revenue",
-                        f"SELECT date_format(gas_day,'yyyy-MM-01') month, ROUND(SUM(revenue_dollars)/1e6,2) revenue, ROUND(SUM(lifting_cost_dollars)/1e6,2) cost, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars)/1e6,2) profit FROM {m('gld_economics')} GROUP BY 1 ORDER BY 1",
+                        f"SELECT left(gas_day::text, 7) || '-01' AS month, ROUND(SUM(revenue_dollars)/1e6,2) revenue, ROUND(SUM(lifting_cost_dollars)/1e6,2) cost, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars)/1e6,2) profit FROM {m('gld_economics')} GROUP BY 1 ORDER BY 1",
                         {"series": [{"key": "revenue", "label": "Sale revenue ($M)"}, {"key": "cost", "label": "Cost of generation ($M)"}, {"key": "profit", "label": "Profit ($M)"}]}),
                        ("Sales gas price trend ($/GJ)", "line", "gas_day", "gas_price_gj",
                         f"SELECT gas_day, ROUND(gas_price_gj,2) gas_price_gj FROM {m('gld_commercial')} ORDER BY gas_day")],
-            "table": (f"SELECT c.gas_day, c.gas_price_gj, c.carbon_price_t, c.nominated_e3m3, c.actual_e3m3, c.nomination_delivery_pct, e.revenue_dollars, e.cost_of_generation_dollars, e.profit_dollars FROM {m('gld_commercial')} c LEFT JOIN (SELECT gas_day, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(lifting_cost_dollars),0) cost_of_generation_dollars, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) profit_dollars FROM {m('gld_economics')} GROUP BY gas_day) e ON c.gas_day=e.gas_day ORDER BY c.gas_day DESC LIMIT 500",
+            "table": (f"SELECT c.gas_day, c.gas_price_gj, c.carbon_price_t, c.nominated_e3m3, c.actual_e3m3, c.nomination_delivery_pct, e.revenue_dollars, e.cost_of_generation_dollars, e.profit_dollars FROM {m('gld_commercial')} c LEFT JOIN (SELECT gas_day, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(lifting_cost_dollars),0) cost_of_generation_dollars, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) profit_dollars FROM {m('gld_economics')} GROUP BY gas_day) e ON c.gas_day=e.gas_day::date ORDER BY c.gas_day DESC NULLS LAST LIMIT 500",
                       ["gas_day", "gas_price_gj", "carbon_price_t", "nominated_e3m3", "actual_e3m3", "nomination_delivery_pct", "revenue_dollars", "cost_of_generation_dollars", "profit_dollars"], "Commercial ledger (daily)"),
         },
         "weather": {
             "title": "Weather & Environment", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Weather, environment and geospatial context: ambient temperature, wind, lightning and flood risk. Drives compression energy, dewpoint margin, flaring and HSE exposure.",
-            "kpis": [("Latest ambient (C)", f"SELECT ROUND(ambient_c,1) v FROM {m('gld_weather')} ORDER BY obs_date DESC LIMIT 1"),
-                     ("Max wind (km/h)", f"SELECT ROUND(MAX(wind_kmh),0) v FROM {m('gld_weather')} WHERE obs_date >= DATE_SUB((SELECT MAX(obs_date) FROM {m('gld_weather')}),61)"),
+            "kpis": [("Latest ambient (C)", f"SELECT ROUND(ambient_c,1) v FROM {m('gld_weather')} ORDER BY obs_date DESC NULLS LAST LIMIT 1"),
+                     ("Max wind (km/h)", f"SELECT ROUND(MAX(wind_kmh),0) v FROM {m('gld_weather')} WHERE {_since(m('gld_weather'), 'obs_date', 61)}"),
                      ("High flood-risk days", f"SELECT COUNT(*) v FROM {m('gld_weather')} WHERE flood_risk>0.3")],
             "charts": [("Ambient temperature trend (C)", "line", "obs_date", "ambient_c",
                         f"SELECT obs_date, ROUND(ambient_c,1) ambient_c FROM {m('gld_weather')} ORDER BY obs_date"),
                        ("Wind trend (km/h)", "line", "obs_date", "wind_kmh",
                         f"SELECT obs_date, ROUND(wind_kmh,1) wind_kmh FROM {m('gld_weather')} ORDER BY obs_date")],
-            "table": (f"SELECT obs_date, ambient_c, wind_kmh, lightning_risk, flood_risk, lat, lon FROM {m('gld_weather')} ORDER BY obs_date DESC LIMIT 40",
+            "table": (f"SELECT obs_date, ambient_c, wind_kmh, lightning_risk, flood_risk, lat, lon FROM {m('gld_weather')} ORDER BY obs_date DESC NULLS LAST LIMIT 40",
                       ["obs_date", "ambient_c", "wind_kmh", "lightning_risk", "flood_risk", "lat", "lon"], "Weather observations (daily)"),
         },
         "produced_water": {
             "title": "Produced Water Management", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Produced-water volumes derived from each well's gas rate and PVT water-gas ratio, with reinjection split and disposal cost. CSG water is a leading cost and compliance driver.",
             "kpis": [("Produced water (m³/d)", f"SELECT ROUND(SUM(water_m3),0) v FROM {m('gld_produced_water')} WHERE gas_day=(SELECT MAX(gas_day) FROM {m('gld_produced_water')})"),
-                     ("Reinjected (%)", f"SELECT ROUND(100*SUM(reinjected_m3)/NULLIF(SUM(water_m3),0),1) v FROM {m('gld_produced_water')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_produced_water')}),61)"),
-                     ("Disposal cost 62d ($)", f"SELECT ROUND(SUM(disposal_cost_dollars),0) v FROM {m('gld_produced_water')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_produced_water')}),61)")],
+                     ("Reinjected (%)", f"SELECT ROUND(100*SUM(reinjected_m3)/NULLIF(SUM(water_m3),0),1) v FROM {m('gld_produced_water')} WHERE {_since(m('gld_produced_water'), 'gas_day', 61)}"),
+                     ("Disposal cost 62d ($)", f"SELECT ROUND(SUM(disposal_cost_dollars),0) v FROM {m('gld_produced_water')} WHERE {_since(m('gld_produced_water'), 'gas_day', 61)}")],
             "charts": [("Produced water trend (m³/d)", "line", "gas_day", "water_m3",
                         f"SELECT gas_day, ROUND(SUM(water_m3),0) water_m3 FROM {m('gld_produced_water')} GROUP BY gas_day ORDER BY gas_day")],
             "table": (f"SELECT well_id, pad_area, completion_type, ROUND(AVG(water_m3),1) water_m3, ROUND(AVG(reinjected_m3),1) reinjected_m3, ROUND(SUM(disposal_cost_dollars),0) disposal_cost_dollars FROM {m('gld_produced_water')} GROUP BY well_id, pad_area, completion_type ORDER BY well_id LIMIT 500",
@@ -600,14 +644,14 @@ def _specs():
         "energy": {
             "title": "Fuel-Gas & Energy Efficiency", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Own-use fuel gas and flaring vs production. Cutting fuel-gas burn and flaring frees salable gas and lowers Scope 1.",
-            "kpis": [("Own-use (%)", f"SELECT ROUND(AVG(own_use_pct),2) v FROM {m('gld_energy_efficiency')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_energy_efficiency')}),61)"),
-                     ("Flaring (%)", f"SELECT ROUND(AVG(flaring_pct),3) v FROM {m('gld_energy_efficiency')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_energy_efficiency')}),61)"),
-                     ("Fuel gas (10³ m³/d)", f"SELECT ROUND(AVG(fuel_gas_e3m3),0) v FROM {m('gld_energy_efficiency')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_energy_efficiency')}),61)")],
+            "kpis": [("Own-use (%)", f"SELECT ROUND(AVG(own_use_pct),2) v FROM {m('gld_energy_efficiency')} WHERE {_since(m('gld_energy_efficiency'), 'gas_day', 61)}"),
+                     ("Flaring (%)", f"SELECT ROUND(AVG(flaring_pct),3) v FROM {m('gld_energy_efficiency')} WHERE {_since(m('gld_energy_efficiency'), 'gas_day', 61)}"),
+                     ("Fuel gas (10³ m³/d)", f"SELECT ROUND(AVG(fuel_gas_e3m3),0) v FROM {m('gld_energy_efficiency')} WHERE {_since(m('gld_energy_efficiency'), 'gas_day', 61)}")],
             "charts": [("Own-use fuel gas trend (%)", "line", "gas_day", "own_use_pct",
                         f"SELECT gas_day, own_use_pct FROM {m('gld_energy_efficiency')} ORDER BY gas_day"),
                        ("Flaring trend (%)", "line", "gas_day", "flaring_pct",
                         f"SELECT gas_day, flaring_pct FROM {m('gld_energy_efficiency')} ORDER BY gas_day")],
-            "table": (f"SELECT gas_day, fuel_gas_e3m3, flare_e3m3, own_use_pct, flaring_pct FROM {m('gld_energy_efficiency')} ORDER BY gas_day DESC LIMIT 40",
+            "table": (f"SELECT gas_day, fuel_gas_e3m3, flare_e3m3, own_use_pct, flaring_pct FROM {m('gld_energy_efficiency')} ORDER BY gas_day DESC NULLS LAST LIMIT 40",
                       ["gas_day", "fuel_gas_e3m3", "flare_e3m3", "own_use_pct", "flaring_pct"], "Energy & fuel-gas ledger (daily)"),
         },
         "carbon_compliance": {
@@ -618,7 +662,7 @@ def _specs():
                      ("ACCU cost ($)", f"SELECT ROUND(SUM(accu_cost_dollars),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})")],
             "charts": [("Scope-1 by facility (t)", "bar", "facility", "scope1_t",
                         f"SELECT facility, ROUND(SUM(scope1_t),0) scope1_t FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')}) GROUP BY facility ORDER BY facility")],
-            "table": (f"SELECT facility, reporting_year, scope1_t, baseline_t, position_t, accu_cost_dollars FROM {m('gld_carbon_compliance')} ORDER BY facility, reporting_year DESC LIMIT 500",
+            "table": (f"SELECT facility, reporting_year, scope1_t, baseline_t, position_t, accu_cost_dollars FROM {m('gld_carbon_compliance')} ORDER BY facility, reporting_year DESC NULLS LAST LIMIT 500",
                       ["facility", "reporting_year", "scope1_t", "baseline_t", "position_t", "accu_cost_dollars"], "Safeguard position by facility & year"),
         },
         "methane_ldar": {
@@ -635,14 +679,14 @@ def _specs():
         "margin": {
             "title": "Molecule-to-Market Margin", "group": "Cross-cutting", "level": "Informative",
             "blurb": "Netback margin by gas day (revenue less lifting and carbon cost) against the contracted take-or-pay commitment, so an OT-driven production dip is priced straight to the trading book.",
-            "kpis": [("Netback 62d ($)", f"SELECT ROUND(SUM(netback_dollars),0) v FROM {m('gld_margin')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_margin')}),61)"),
-                     ("Netback ($/GJ)", f"SELECT ROUND(AVG(netback_per_gj),2) v FROM {m('gld_margin')} WHERE gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_margin')}),61)"),
-                     ("Take-or-pay shortfall days 62d", f"SELECT COUNT(*) v FROM {m('gld_margin')} WHERE take_or_pay_shortfall_e3m3>0 AND gas_day>=DATE_SUB((SELECT MAX(gas_day) FROM {m('gld_margin')}),61)")],
+            "kpis": [("Netback 62d ($)", f"SELECT ROUND(SUM(netback_dollars),0) v FROM {m('gld_margin')} WHERE {_since(m('gld_margin'), 'gas_day', 61)}"),
+                     ("Netback ($/GJ)", f"SELECT ROUND(AVG(netback_per_gj),2) v FROM {m('gld_margin')} WHERE {_since(m('gld_margin'), 'gas_day', 61)}"),
+                     ("Take-or-pay shortfall days 62d", f"SELECT COUNT(*) v FROM {m('gld_margin')} WHERE take_or_pay_shortfall_e3m3>0 AND {_since(m('gld_margin'), 'gas_day', 61)}")],
             "charts": [("Netback trend ($/day)", "line", "gas_day", "netback_dollars",
                         f"SELECT gas_day, netback_dollars FROM {m('gld_margin')} ORDER BY gas_day"),
                        ("Netback per GJ trend ($)", "line", "gas_day", "netback_per_gj",
                         f"SELECT gas_day, netback_per_gj FROM {m('gld_margin')} ORDER BY gas_day")],
-            "table": (f"SELECT gas_day, revenue, netback_dollars, netback_per_gj, deferred, committed_e3m3, take_or_pay_shortfall_e3m3 FROM {m('gld_margin')} ORDER BY gas_day DESC LIMIT 40",
+            "table": (f"SELECT gas_day, revenue, netback_dollars, netback_per_gj, deferred, committed_e3m3, take_or_pay_shortfall_e3m3 FROM {m('gld_margin')} ORDER BY gas_day DESC NULLS LAST LIMIT 40",
                       ["gas_day", "revenue", "netback_dollars", "netback_per_gj", "deferred", "committed_e3m3", "take_or_pay_shortfall_e3m3"], "Margin & commitment (daily)"),
         },
         "spares_risk": {
@@ -670,9 +714,9 @@ def _specs():
         "asset_model": {
             "title": "Asset & Document Explorer", "group": "Others", "level": "Governed",
             "blurb": "The semantic backbone: tag-to-asset resolution, the functional-location hierarchy, and cross-system id mapping. Every tag ID is the universal join key.",
-            "kpis": [("Tags in registry", f"SELECT COUNT(*) v FROM {m('slv_tag_registry')}"),
-                     ("Assets", f"SELECT COUNT(*) v FROM {m('slv_asset_master')}"),
-                     ("Functional locations", f"SELECT COUNT(*) v FROM {m('slv_functional_location')}")],
+            "kpis": [("Tags in registry", f"SELECT COUNT(*) v FROM {m('gld_tag_context')}"),
+                     ("Assets", f"SELECT COUNT(*) v FROM {m('gld_asset_master')}"),
+                     ("Functional locations", f"SELECT COUNT(*) v FROM {m('gld_functional_location')}")],
             "charts": [],  # item 55: "Tags by system" bar removed (no analytical value)
         },
     }
@@ -714,18 +758,13 @@ def tag_lookup(term: str = ""):
     if not ql:
         return JSONResponse({"rows": []})
     sql = (
-        "SELECT t.tag_id, t.asset_id, t.area_code, t.system_code, t.class_code, t.signal, t.unit, "
-        "t.description, t.measured_or_calculated, t.cadence, "
-        "ROUND(t.eng_range_min,2) eng_range_min, ROUND(t.eng_range_max,2) eng_range_max, "
-        "a.equipment_type, a.criticality, a.manufacturer, a.install_year, "
-        "f.name fl_name, f.level fl_level, "
-        "ROUND(l.latest_value,3) latest_value, l.latest_quality, l.latest_ts, "
-        "x.historian_tag, x.eam_fl, x.osdu_ref, x.doc_entity, x.is_stale "
-        f"FROM {T('slv_tag_registry')} t "
-        f"LEFT JOIN {T('slv_asset_master')} a ON t.asset_id = a.asset_id AND a.is_current "
-        f"LEFT JOIN {T('slv_functional_location')} f ON t.fl_id = f.fl_id AND f.is_current "
-        f"LEFT JOIN {T('gld_tag_latest')} l ON t.tag_id = l.tag_id "
-        f"LEFT JOIN {T('slv_id_crossmap')} x ON x.entity = t.tag_id "
+        "SELECT tag_id, asset_id, area_code, system_code, class_code, signal, unit, "
+        "description, measured_or_calculated, cadence, "
+        "ROUND(eng_range_min,2) eng_range_min, ROUND(eng_range_max,2) eng_range_max, "
+        "equipment_type, criticality, manufacturer, install_year, fl_name, fl_level, "
+        "ROUND(latest_value,3) latest_value, latest_quality, latest_ts, "
+        "historian_tag, eam_fl, osdu_ref, doc_entity, is_stale "
+        f"FROM {T('gld_tag_context')} t "
         "WHERE lower(t.tag_id) LIKE %(p)s OR lower(t.asset_id) LIKE %(p)s "
         "OR lower(t.signal) LIKE %(p)s OR lower(t.description) LIKE %(p)s "
         "ORDER BY t.tag_id"  # item 52: no 30-tag cap: show every match
@@ -743,17 +782,7 @@ def tree_areas():
     """Top of the physical-location tree: every area (well pad / CPF train / gathering hub /
     custody station) with its proper name and asset / tag counts. Lazy, children load on expand."""
     def load():
-        counts, names = qmany([
-            f"SELECT a.area_code, COUNT(DISTINCT a.asset_id) n_assets, COUNT(t.tag_id) n_tags "
-            f"FROM {T('slv_asset_master')} a "
-            f"LEFT JOIN {T('slv_tag_registry')} t ON t.asset_id = a.asset_id "
-            f"WHERE a.is_current GROUP BY a.area_code ORDER BY a.area_code",
-            f"SELECT area_code, name FROM {T('slv_functional_location')} WHERE level = 'Area' AND is_current",
-        ])
-        nm = {r["area_code"]: r["name"] for r in names}
-        for r in counts:
-            r["name"] = nm.get(r["area_code"], r["area_code"])
-        return counts
+        return q(f"SELECT area_code, n_assets, n_tags, name FROM {T('gld_sites')} ORDER BY area_code")
     return JSONResponse({"areas": cached("tree_areas", 300, load)})
 
 
@@ -761,13 +790,10 @@ def tree_areas():
 def tree_assets(area: str):
     """Assets at one physical location, with equipment type, criticality, health colour and tag count."""
     sql = (
-        "SELECT a.asset_id, a.equipment_type, a.criticality, a.system_code, "
-        "COUNT(t.tag_id) n_tags, s.pin_colour "
-        f"FROM {T('slv_asset_master')} a "
-        f"LEFT JOIN {T('slv_tag_registry')} t ON t.asset_id = a.asset_id "
+        "SELECT a.asset_id, a.equipment_type, a.criticality, a.system_code, a.n_tags, s.pin_colour "
+        f"FROM {T('gld_asset_master')} a "
         f"LEFT JOIN {T('gld_asset_state')} s ON s.asset_id = a.asset_id "
-        "WHERE a.is_current AND a.area_code = %(a)s "
-        "GROUP BY a.asset_id, a.equipment_type, a.criticality, a.system_code, s.pin_colour "
+        "WHERE a.area_code = %(a)s "
         "ORDER BY a.system_code, a.asset_id"
     )
     try:
@@ -781,10 +807,9 @@ def tree_assets(area: str):
 def tree_tags(asset_id: str):
     """Tags on one asset: the leaf of the physical-location tree. Each resolves via /api/tag-lookup."""
     sql = (
-        "SELECT t.tag_id, t.signal, t.unit, ROUND(l.latest_value,2) latest_value, l.latest_quality "
-        f"FROM {T('slv_tag_registry')} t "
-        f"LEFT JOIN {T('gld_tag_latest')} l ON t.tag_id = l.tag_id "
-        "WHERE t.asset_id = %(a)s ORDER BY t.tag_id"
+        "SELECT tag_id, signal, unit, ROUND(latest_value,2) latest_value, latest_quality "
+        f"FROM {T('gld_tag_context')} "
+        "WHERE asset_id = %(a)s ORDER BY tag_id"
     )
     try:
         rows = q(sql, {"a": asset_id})
@@ -797,13 +822,13 @@ def tree_tags(asset_id: str):
 def overview():
     def load():
         res = qmany([
-            f"SELECT actual_e3m3, nominated_e3m3, gap_to_nomination_e3m3 FROM {T('gld_field_production')} ORDER BY gas_day DESC LIMIT 1",          # 0
+            f"SELECT actual_e3m3, nominated_e3m3, gap_to_nomination_e3m3 FROM {T('gld_field_production')} ORDER BY gas_day DESC NULLS LAST LIMIT 1",          # 0
             f"SELECT ROUND(SUM(production_at_risk_e3m3d),0) v FROM {T('gld_constraint_ranking')}",                                                   # 1
-            f"SELECT ROUND(SUM(deferred_dollars),0) v FROM {T('gld_deferment')} WHERE gas_day >= DATE_SUB((SELECT MAX(gas_day) FROM {T('gld_field_production')}),61)",  # 2
+            f"SELECT ROUND(SUM(deferred_dollars),0) v FROM {T('gld_deferment')} WHERE {_since(T('gld_field_production'), 'gas_day', 61)}",  # 2
             f"SELECT ROUND(SUM(revenue_dollars),0) v FROM {T('gld_economics')}",                                                                     # 3
             f"SELECT ROUND(AVG(ci),2) v FROM (SELECT gas_day, SUM(co2_kg)/NULLIF(MAX(field_e3m3),0) ci FROM {T('gld_emissions_ledger')} GROUP BY gas_day)",  # 4 field-level carbon intensity (consistent with Emissions tab)
             f"SELECT SUM(is_red) v FROM {T('gld_asset_state')}",                                                                                     # 5
-            f"SELECT SUM(esd_trips) v FROM {T('gld_safety_alarms')} WHERE gas_day >= DATE_SUB((SELECT MAX(gas_day) FROM {T('gld_field_production')}),61)",  # 6
+            f"SELECT SUM(esd_trips) v FROM {T('gld_safety_alarms')} WHERE {_since(T('gld_field_production'), 'gas_day', 61)}",  # 6
             f"SELECT SUM(open_wos) v FROM {T('gld_maintenance_reliability')}",                                                                       # 7
             f"SELECT gas_day, actual_e3m3, nominated_e3m3 FROM {T('gld_field_production')} ORDER BY gas_day",                                        # 8
         ])
@@ -878,7 +903,7 @@ def scenes():
         f"""SELECT scene_id, COUNT(*) assets,
                    SUM(is_red) red, SUM(is_amber) amber, SUM(CASE WHEN pin_colour='green' THEN 1 ELSE 0 END) green
             FROM {T('gld_asset_state')} WHERE scene_id IS NOT NULL
-            GROUP BY scene_id ORDER BY red DESC, amber DESC, scene_id""")))
+            GROUP BY scene_id ORDER BY red DESC NULLS LAST, amber DESC NULLS LAST, scene_id""")))
 
 
 @app.get("/api/scene/{scene_id}")
@@ -887,7 +912,7 @@ def scene(scene_id: str):
         f"""SELECT asset_id, equipment_type, area_code, pin_colour, criticality,
                    ROUND(health_score,1) health_score, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d,
                    ROUND(latest_vibration,2) latest_vibration, hotspot_x, hotspot_y
-            FROM {T('gld_asset_state')} WHERE scene_id = %(s)s ORDER BY is_red DESC, is_amber DESC, asset_id""",
+            FROM {T('gld_asset_state')} WHERE scene_id = %(s)s ORDER BY is_red DESC NULLS LAST, is_amber DESC NULLS LAST, asset_id""",
         {"s": scene_id}))
 
 
@@ -916,11 +941,10 @@ def asset(asset_id: str):
             (f"SELECT * FROM {T('gld_asset_state')} WHERE asset_id = %(a)s", {"a": asset_id}),
             (f"SELECT gas_day, ROUND(vibration_overall,2) vibration_overall, ROUND(polytropic_eff,1) polytropic_eff, ROUND(health_score,1) health_score, ROUND(rul_days_proxy,0) rul_days_proxy FROM {T('gld_compression_health')} WHERE asset_id = %(a)s ORDER BY gas_day", {"a": asset_id}),
             (f"SELECT recommendation, maturity_level, evidence, production_at_risk_e3m3d FROM {T('gld_recommendations')} WHERE asset_id = %(a)s", {"a": asset_id}),
-            (f"SELECT gas_day, cause_desc, ROUND(deferred_e3m3,1) deferred_e3m3, ROUND(deferred_dollars,0) deferred_dollars FROM {T('gld_deferment')} WHERE asset_id = %(a)s ORDER BY gas_day DESC LIMIT 20", {"a": asset_id}),
-            (f"""SELECT r.tag_id, r.signal, r.unit, r.description, ROUND(l.latest_value,2) latest_value, l.latest_quality
-                 FROM {T('slv_tag_registry')} r LEFT JOIN {T('gld_tag_latest')} l ON l.tag_id = r.tag_id
-                 WHERE r.asset_id = %(a)s ORDER BY r.tag_id""", {"a": asset_id}),
-            (f"SELECT wo_id, wo_type, priority, status, ROUND(cost,0) cost, created_date FROM {T('gld_workorders')} WHERE asset_id = %(a)s ORDER BY created_date DESC LIMIT 15", {"a": asset_id}),
+            (f"SELECT gas_day, cause_desc, ROUND(deferred_e3m3,1) deferred_e3m3, ROUND(deferred_dollars,0) deferred_dollars FROM {T('gld_deferment')} WHERE asset_id = %(a)s ORDER BY gas_day DESC NULLS LAST LIMIT 20", {"a": asset_id}),
+            (f"""SELECT tag_id, signal, unit, description, ROUND(latest_value,2) latest_value, latest_quality
+                 FROM {T('gld_tag_context')} WHERE asset_id = %(a)s ORDER BY tag_id""", {"a": asset_id}),
+            (f"SELECT wo_id, wo_type, priority, status, ROUND(cost,0) cost, created_date FROM {T('gld_workorders')} WHERE asset_id = %(a)s ORDER BY created_date DESC NULLS LAST LIMIT 15", {"a": asset_id}),
         ])
         return {"state": state[0] if state else {}, "health": health, "recommendations": reco, "deferment": defer, "tags": tags, "workorders": wos}
     return JSONResponse(cached(f"asset:{asset_id}", 180, load))
@@ -933,9 +957,9 @@ def asset_context(asset_id: str):
 
     def load():
         lab, notifs, fails, spares = qmany([
-            (f"SELECT sample_id, sample_point, sample_date, c1_molpct, co2_molpct, h2s_ppm FROM {T('gld_lab_assay')} WHERE asset_id = %(a)s ORDER BY sample_date DESC LIMIT 10", {"a": asset_id}),
-            (f"SELECT notif_id, notif_type, priority, status, raised_date FROM {T('gld_notifications')} WHERE asset_id = %(a)s ORDER BY raised_date DESC LIMIT 10", {"a": asset_id}),
-            (f"SELECT failure_id, failure_date, iso14224_code, failure_mode, downtime_hours FROM {T('gld_failure_history')} WHERE asset_id = %(a)s ORDER BY failure_date DESC LIMIT 10", {"a": asset_id}),
+            (f"SELECT sample_id, sample_point, sample_date, c1_molpct, co2_molpct, h2s_ppm FROM {T('gld_lab_assay')} WHERE asset_id = %(a)s ORDER BY sample_date DESC NULLS LAST LIMIT 10", {"a": asset_id}),
+            (f"SELECT notif_id, notif_type, priority, status, raised_date FROM {T('gld_notifications')} WHERE asset_id = %(a)s ORDER BY raised_date DESC NULLS LAST LIMIT 10", {"a": asset_id}),
+            (f"SELECT failure_id, failure_date, iso14224_code, failure_mode, downtime_hours FROM {T('gld_failure_history')} WHERE asset_id = %(a)s ORDER BY failure_date DESC NULLS LAST LIMIT 10", {"a": asset_id}),
             (f"SELECT part_name, procurement_type, lead_time_days, on_hand, unit_cost, exposure FROM {T('gld_spares_risk')} WHERE asset_id = %(a)s", {"a": asset_id}),
         ])
         return {"lab": lab, "notifications": notifs, "failures": fails, "spares": spares}
@@ -949,7 +973,7 @@ def workorder(wo_id: str):
         wo = q(f"SELECT * FROM {T('gld_workorders')} WHERE wo_id = %(w)s", {"w": wo_id})
         row = wo[0] if wo else {}
         aid = row.get("asset_id")
-        notifs = q(f"SELECT notif_id, notif_type, priority, status, raised_date FROM {T('gld_notifications')} WHERE asset_id = %(a)s ORDER BY raised_date DESC LIMIT 10", {"a": aid}) if aid else []
+        notifs = q(f"SELECT notif_id, notif_type, priority, status, raised_date FROM {T('gld_notifications')} WHERE asset_id = %(a)s ORDER BY raised_date DESC NULLS LAST LIMIT 10", {"a": aid}) if aid else []
         return {"wo": row, "notifications": notifs}
     return JSONResponse(cached(f"wo:{wo_id}", 150, load))
 
@@ -958,10 +982,10 @@ def workorder(wo_id: str):
 def entity_list(kind: str):
     """Full notification / failure lists, opened from the KPI tiles (item 29) rather than shown by default."""
     if kind == "notifications":
-        rows = q(f"SELECT notif_id, asset_id, area_code, notif_type, priority, status, raised_date FROM {T('gld_notifications')} ORDER BY raised_date DESC LIMIT 1000")
+        rows = q(f"SELECT notif_id, asset_id, area_code, notif_type, priority, status, raised_date FROM {T('gld_notifications')} ORDER BY raised_date DESC NULLS LAST LIMIT 1000")
         return JSONResponse({"title": "Notifications", "columns": _cols(["notif_id", "asset_id", "area_code", "notif_type", "priority", "status", "raised_date"]), "rows": rows})
     if kind == "failures":
-        rows = q(f"SELECT failure_id, asset_id, area_code, equipment_type, failure_date, iso14224_code, failure_mode, downtime_hours FROM {T('gld_failure_history')} ORDER BY failure_date DESC LIMIT 1000")
+        rows = q(f"SELECT failure_id, asset_id, area_code, equipment_type, failure_date, iso14224_code, failure_mode, downtime_hours FROM {T('gld_failure_history')} ORDER BY failure_date DESC NULLS LAST LIMIT 1000")
         return JSONResponse({"title": "Failure history (ISO 14224)", "columns": _cols(["failure_id", "asset_id", "area_code", "equipment_type", "failure_date", "iso14224_code", "failure_mode", "downtime_hours"]), "rows": rows})
     return JSONResponse({"error": "unknown list"}, status_code=404)
 
@@ -969,16 +993,14 @@ def entity_list(kind: str):
 @app.get("/api/asset_series/{asset_id}")
 def asset_series(asset_id: str):
     """Per-asset telemetry over time, for the asset detail drawer's sparklines. Works for any asset type:
-    generic process signals come from the silver telemetry (long form); compressor vibration/health are
-    unioned from the compression-health mart (not carried on the process-telemetry stream)."""
+    generic process signals come from the per-asset signal series mart (5-gas-day averages); compressor
+    vibration/health are unioned from the compression-health mart (not carried on the process stream)."""
     asset_id = _resolve_asset(asset_id)
 
     def load():
         rows, vib = qmany([
-            (f"""SELECT signal, MAX(unit) unit, gas_day, ROUND(AVG(value),3) value
-                 FROM {T('slv_telemetry_process')}
-                 WHERE asset_id = %(a)s AND value IS NOT NULL
-                 GROUP BY signal, gas_day ORDER BY signal, gas_day""", {"a": asset_id}),
+            (f"""SELECT signal, unit, gas_day, value FROM {T('gld_asset_signal_series')}
+                 WHERE asset_id = %(a)s ORDER BY signal, gas_day""", {"a": asset_id}),
             (f"""SELECT gas_day, ROUND(vibration_overall,2) vibration_overall, ROUND(health_score,1) health_score
                  FROM {T('gld_compression_health')} WHERE asset_id = %(a)s ORDER BY gas_day""", {"a": asset_id}),
         ])
@@ -1021,7 +1043,7 @@ def weather_map():
                        ROUND(MIN(ambient_c),1) tmin, ROUND(MAX(ambient_c),1) tmax, ROUND(AVG(ambient_c),1) tavg,
                        ROUND(MAX(wind_kmh),0) wind_max, ROUND(MAX(lightning_risk),2) ltn_max, ROUND(MAX(flood_risk),2) fld_max
                 FROM {T('gld_weather')} WHERE lat IS NOT NULL GROUP BY area_code ORDER BY area_code""",
-            f"SELECT area_code, name FROM {T('slv_functional_location')} WHERE level = 'Area' AND is_current",
+            f"SELECT area_code, name FROM {T('gld_sites')}",
         ])
         nm = {r["area_code"]: r["name"] for r in names}
         for r in rows:
@@ -1045,7 +1067,7 @@ def field_map():
                        SUM(is_red) red, SUM(is_amber) amber, COUNT(*) assets,
                        ROUND(SUM(production_at_risk_e3m3d),0) risk
                 FROM {T('gld_asset_state')} WHERE gps_lat IS NOT NULL GROUP BY area_code""",
-            f"SELECT area_code, name FROM {T('slv_functional_location')} WHERE level = 'Area' AND is_current",
+            f"SELECT area_code, name FROM {T('gld_sites')}",
         ])
         nm = {r["area_code"]: r["name"] for r in names}
         for f in facs:
@@ -1069,18 +1091,14 @@ def recommendations():
 
 
 def _recommendations():
-    if _lakebase_ok():
-        try:
-            with _pg_conn().cursor() as cur:
-                cur.execute("""SELECT rec_id, asset_id, constraint_type, production_at_risk_e3m3d, recommendation,
-                                      maturity_level, evidence, status, note, decided_by FROM gas_twin.recommendation_decisions
-                               ORDER BY production_at_risk_e3m3d DESC NULLS LAST""")
-                cols = [c.name for c in cur.description]
-                return [{c: _coerce(v) for c, v in zip(cols, r)} for r in cur.fetchall()]
-        except Exception as e:
-            pass
-    # fallback to gold (read-only) if Lakebase not wired yet
-    return q(f"SELECT rec_id, asset_id, constraint_type, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d, recommendation, maturity_level, evidence, 'proposed' status FROM {T('gld_recommendations')} ORDER BY production_at_risk_e3m3d DESC")
+    try:
+        return q("""SELECT rec_id, asset_id, constraint_type, production_at_risk_e3m3d, recommendation,
+                           maturity_level, evidence, status, note, decided_by FROM gas_twin.recommendation_decisions
+                    ORDER BY production_at_risk_e3m3d DESC NULLS LAST""")
+    except Exception:
+        pass
+    # fallback to the synced gold mart (read-only) if the write-back table is not seeded yet
+    return q(f"SELECT rec_id, asset_id, constraint_type, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d, recommendation, maturity_level, evidence, 'proposed' status FROM {T('gld_recommendations')} ORDER BY production_at_risk_e3m3d DESC NULLS LAST")
 
 
 def _with_open_wos(recs):
@@ -1090,7 +1108,7 @@ def _with_open_wos(recs):
         return recs
     try:
         lst = ", ".join("'" + i.replace("'", "") + "'" for i in ids)
-        rows = q(f"SELECT asset_id, wo_id, priority FROM {T('gld_workorders')} WHERE status IN ('open','in_progress') AND asset_id IN ({lst}) ORDER BY asset_id, priority, created_date DESC")
+        rows = q(f"SELECT asset_id, wo_id, priority FROM {T('gld_workorders')} WHERE status IN ('open','in_progress') AND asset_id IN ({lst}) ORDER BY asset_id, priority, created_date DESC NULLS LAST")
     except Exception:
         return recs
     by = {}
@@ -1103,16 +1121,13 @@ def _with_open_wos(recs):
 
 @app.post("/api/recommendation/{rec_id}")
 async def decide(rec_id: str, request: Request):
-    if not _lakebase_ok():
-        return JSONResponse({"ok": False, "error": "write-back not configured"}, status_code=400)
     body = await request.json()
     status = body.get("status", "proposed")
     note = body.get("note", "")
     who = request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User") or "app-user"
     try:
-        with _pg_conn().cursor() as cur:
-            cur.execute("""UPDATE gas_twin.recommendation_decisions SET status=%s, note=%s, decided_by=%s, decided_at=now() WHERE rec_id=%s""",
-                        (status, note, who, rec_id))
+        q("""UPDATE gas_twin.recommendation_decisions SET status=%s, note=%s, decided_by=%s, decided_at=now() WHERE rec_id=%s""",
+          (status, note, who, rec_id))
         return JSONResponse({"ok": True, "decided_by": who})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
@@ -1122,7 +1137,7 @@ async def decide(rec_id: str, request: Request):
 def health():
     try:
         n = _scalar(f"SELECT COUNT(*) v FROM {T('gld_asset_state')}")
-        return JSONResponse({"ok": True, "assets": n, "catalog": CATALOG, "schema": SCHEMA})
+        return JSONResponse({"ok": True, "assets": n, "database": "lakebase", "schema": PG_SCHEMA})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)[:200]})
 
@@ -1145,8 +1160,7 @@ def _impact_graph():
             f"SELECT from_id, to_id, flow_e3m3d, flow_tj_d FROM {T('gld_supply_network')} WHERE flow_e3m3d > 0",
             f"SELECT * FROM {T('gld_customer_supply')} ORDER BY delivery_point, priority, customer_name",
         ])
-        window = q(f"SELECT MAX(gas_day) d FROM {T('slv_customer_deliveries')}")
-        return {"nodes": nodes, "links": links, "customers": custs, "as_of": (window[0]["d"] if window else None)}
+        return {"nodes": nodes, "links": links, "customers": custs, "as_of": (custs[0].get("as_of_day") if custs else None)}
     return cached("impact_graph", 300, load)
 
 

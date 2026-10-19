@@ -56,15 +56,20 @@ resources:
             client: "3"
             dependencies: ["databricks-sdk"]
 
-    # ---- Lakebase seed: create the write-back table + grant the app service principal -------
-    lakebase_seed:
-      name: "[${var.catalog}.${var.schema}] Gas Twin - Lakebase seed"
-      description: Seeds the Lakebase recommendation-decisions table and grants the app SP. Run after the app exists.
+    # ---- Lakebase sync: land the gold marts in Lakebase (the App's only database) -------------
+    # Creates one synced table per gold mart (all in one sync pipeline), syncs them now, seeds the
+    # recommendation write-back table, grants the app service principal, and creates the scheduled
+    # "Lakebase sync" job that re-runs the sync pipeline every 5 minutes. Run right after the medallion.
+    lakebase_sync:
+      name: "[${var.catalog}.${var.schema}] Gas Twin - Lakebase setup + first sync"
+      description: Lands the gold marts in Lakebase as synced tables, seeds the write-back table, grants the app and schedules the 5-minute re-sync. Run after the medallion.
       tasks:
-        - task_key: seed
+        - task_key: sync
+          max_retries: 2              # a serverless start-up glitch is retried; the script is idempotent
+          min_retry_interval_millis: 30000
           spark_python_task:
             python_file: ../serving/setup_lakebase.py
-            parameters: ["--instance", "${var.db_instance}", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--app-name", "${var.app_name}"]
+            parameters: ["--project", "${var.lakebase_project}", "--catalog", "${var.catalog}", "--schema", "${var.schema}", "--app-name", "${var.app_name}", "--sync-cron", "${var.sync_cron}"]
           environment_key: lakebase_env
       environments:
         - environment_key: lakebase_env

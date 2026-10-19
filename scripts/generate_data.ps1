@@ -5,7 +5,8 @@
 .DESCRIPTION
   Fires the "setup" job in the deployed bundle: builds the semantic backbone and backfills ~2 years
   of telemetry/events plus the batch, reference and file sources. deploy.ps1 calls this automatically;
-  you can also run it on its own to regenerate the data after a config change.
+  you can also run it on its own to regenerate the data after a config change. After regenerating,
+  re-run the medallion; the scheduled Lakebase sync then lands the new gold in the app within 5 minutes.
   Prerequisite: the bundle is already deployed (scripts\deploy.ps1) and you are signed in.
 
 .EXAMPLE
@@ -15,7 +16,7 @@ param(
   [string]$Catalog    = "gas_upstream_digital_twin",
   [string]$Schema     = "digital_twin",
   [string]$Warehouse  = "",
-  [string]$DbInstance = "gas-upstream-twin-db",
+  [string]$Lakebase   = "gas-upstream-twin-lakebase",
   [string]$AppName    = "gas-upstream-twin",
   [string]$Profile    = "gas-twin"
 )
@@ -25,7 +26,7 @@ $Root = Split-Path -Parent $Here
 . (Join-Path $Here 'lib\common.ps1')
 Set-Location $Root
 
-$Vars = "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,db_instance=$DbInstance,app_name=$AppName"
+$Vars = "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,lakebase_project=$Lakebase,app_name=$AppName"
 Step "Running the data-generation job (setup)"
 Info "catalog=$Catalog schema=$Schema - this takes ~10-20 minutes on serverless"
 & databricks bundle run setup -t main -p $Profile --var $Vars

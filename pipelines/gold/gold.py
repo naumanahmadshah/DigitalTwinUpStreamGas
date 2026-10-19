@@ -436,6 +436,139 @@ def gld_tag_latest():
                     F.col("quality").alias("latest_quality"), F.col("event_time").alias("latest_ts")))
 
 
+# ===== App-serving backbone marts (synced to Lakebase) =======================================
+# The App reads ONLY Lakebase, and only gold is synced there, so the semantic backbone the App needs
+# (tag resolution, the location tree, site names, per-asset telemetry, safety events) is published
+# here as gold rather than read from silver.
+@dp.table(name="gld_tag_context",
+          comment="Every registered tag resolved end to end: tag -> asset -> functional location -> latest value -> ids in every other system (PI historian, EAM, OSDU, P&ID). One row per tag. Serves the App's tag lookup, the location tree and the asset detail, and Genie tag questions. Join key: tag_id.",
+          schema="""tag_id STRING NOT NULL COMMENT 'Contextualised tag (AREA-SYSTEM-CLASS-NNNN): the universal join key and 3D hotspot key.',
+          asset_id STRING COMMENT 'Asset the tag sits on.',
+          area_code STRING COMMENT 'Site (well pad, gathering hub, processing train, custody station).',
+          system_code STRING COMMENT 'Process system (WB, AL, GL, SEP, CMP, DEH, AMN, NGL, UTL, FLR, MET).',
+          class_code STRING COMMENT 'ISA-5.1 style instrument / equipment class.',
+          signal STRING COMMENT 'Measured or derived signal name.',
+          unit STRING COMMENT 'Engineering unit.',
+          description STRING COMMENT 'Tag description.',
+          measured_or_calculated STRING COMMENT 'Whether the value is measured or calculated.',
+          cadence STRING COMMENT 'Sampling cadence.',
+          eng_range_min DOUBLE COMMENT 'Normal operating range, low end.',
+          eng_range_max DOUBLE COMMENT 'Normal operating range, high end.',
+          equipment_type STRING COMMENT 'Equipment type of the asset.',
+          criticality STRING COMMENT 'Asset criticality.',
+          manufacturer STRING COMMENT 'Asset manufacturer.',
+          install_year INT COMMENT 'Year the asset was installed.',
+          fl_name STRING COMMENT 'Functional location name.',
+          fl_level STRING COMMENT 'Functional location level.',
+          latest_value DOUBLE COMMENT 'Latest reading.',
+          latest_quality STRING COMMENT 'Quality flag of the latest reading.',
+          latest_ts TIMESTAMP COMMENT 'Time of the latest reading.',
+          historian_tag STRING COMMENT 'PI historian tag.',
+          eam_fl STRING COMMENT 'EAM functional location.',
+          osdu_ref STRING COMMENT 'OSDU reference.',
+          doc_entity STRING COMMENT 'P&ID / document entity.',
+          is_stale BOOLEAN COMMENT 'True when the cross-system mapping is stale.'""")
+def gld_tag_context():
+    t = spark.read.table("slv_tag_registry")
+    a = spark.read.table("slv_asset_master").where("is_current").select("asset_id", "equipment_type", "criticality", "manufacturer", "install_year")
+    f = spark.read.table("slv_functional_location").where("is_current").select("fl_id", F.col("name").alias("fl_name"), F.col("level").alias("fl_level"))
+    l = spark.read.table("gld_tag_latest").select("tag_id", "latest_value", "latest_quality", "latest_ts")
+    x = spark.read.table("slv_id_crossmap").select(F.col("entity").alias("tag_id"), "historian_tag", "eam_fl", "osdu_ref", "doc_entity", "is_stale")
+    return (t.join(a, "asset_id", "left").join(f, "fl_id", "left").join(l, "tag_id", "left").join(x, "tag_id", "left")
+            .select("tag_id", "asset_id", "area_code", "system_code", "class_code", "signal", "unit", "description",
+                    "measured_or_calculated", "cadence", "eng_range_min", "eng_range_max", "equipment_type", "criticality",
+                    F.col("manufacturer").cast("string").alias("manufacturer"), F.col("install_year").cast("int").alias("install_year"),
+                    "fl_name", "fl_level", "latest_value", "latest_quality", "latest_ts",
+                    "historian_tag", "eam_fl", "osdu_ref", "doc_entity", "is_stale"))
+
+
+@dp.table(name="gld_asset_master",
+          comment="Current asset register: one row per asset with its site, system, class, equipment type, criticality, maker, install year and tag count. Serves the App's location tree and Genie asset questions. Join key: asset_id.",
+          schema="""asset_id STRING NOT NULL COMMENT 'Asset id.',
+          fl_id STRING COMMENT 'Functional location the asset is installed at.',
+          area_code STRING COMMENT 'Site.',
+          system_code STRING COMMENT 'Process system.',
+          class_code STRING COMMENT 'Equipment class.',
+          equipment_type STRING COMMENT 'Equipment type.',
+          criticality STRING COMMENT 'Asset criticality.',
+          manufacturer STRING COMMENT 'Manufacturer.',
+          install_year INT COMMENT 'Year installed.',
+          n_tags BIGINT COMMENT 'Registered tags on the asset.'""")
+def gld_asset_master():
+    a = spark.read.table("slv_asset_master").where("is_current")
+    n = spark.read.table("slv_tag_registry").groupBy("asset_id").agg(F.count("*").alias("n_tags"))
+    return (a.join(n, "asset_id", "left")
+            .select("asset_id", "fl_id", "area_code", "system_code", "class_code", "equipment_type", "criticality",
+                    F.col("manufacturer").cast("string").alias("manufacturer"), F.col("install_year").cast("int").alias("install_year"),
+                    F.coalesce(F.col("n_tags"), F.lit(0)).cast("bigint").alias("n_tags")))
+
+
+@dp.table(name="gld_functional_location",
+          comment="Current functional-location hierarchy (field -> site -> system -> position). One row per location. Serves the App's Asset & Document Explorer and Genie. Join key: fl_id.",
+          schema="""fl_id STRING NOT NULL COMMENT 'Functional location id.',
+          parent_fl_id STRING COMMENT 'Parent location.',
+          level STRING COMMENT 'Hierarchy level (Field, Area, System, Position).',
+          code STRING COMMENT 'Location code.',
+          name STRING COMMENT 'Location name.',
+          area_code STRING COMMENT 'Site the location sits in.',
+          system_code STRING COMMENT 'Process system.',
+          class_code STRING COMMENT 'Equipment class.',
+          criticality STRING COMMENT 'Criticality.'""")
+def gld_functional_location():
+    return (spark.read.table("slv_functional_location").where("is_current")
+            .select("fl_id", "parent_fl_id", "level", "code", "name", "area_code", "system_code", "class_code", "criticality"))
+
+
+@dp.table(name="gld_sites",
+          comment="Every site (well pad, gathering hub, processing train, custody station) with its proper name and asset and tag counts. Serves site names on the App's maps, weather tiles and location tree, and Genie. Join key: area_code.",
+          schema="""area_code STRING NOT NULL COMMENT 'Site code.',
+          name STRING COMMENT 'Site name, e.g. Well pad BAR045 (Beetaloo Basin).',
+          n_assets BIGINT COMMENT 'Current assets at the site.',
+          n_tags BIGINT COMMENT 'Registered tags at the site.'""")
+def gld_sites():
+    nm = spark.read.table("slv_functional_location").where("is_current AND level = 'Area'").groupBy("area_code").agg(F.first("name").alias("name"))
+    a = spark.read.table("gld_asset_master").groupBy("area_code").agg(F.count("*").alias("n_assets"), F.sum("n_tags").alias("n_tags"))
+    return (a.join(nm, "area_code", "left")
+            .select("area_code", F.coalesce("name", "area_code").alias("name"),
+                    F.col("n_assets").cast("bigint").alias("n_assets"), F.col("n_tags").cast("bigint").alias("n_tags")))
+
+
+@dp.table(name="gld_asset_signal_series",
+          comment="Per-asset telemetry trend for charting: the average of each process signal over 5-gas-day buckets across the full history (about 146 points per signal). Serves the App's asset-detail telemetry charts and Genie trend questions. Key: asset_id + signal + gas_day.",
+          schema="""asset_id STRING NOT NULL COMMENT 'Asset id.',
+          signal STRING NOT NULL COMMENT 'Process signal.',
+          gas_day DATE NOT NULL COMMENT 'First gas day of the 5-day bucket.',
+          unit STRING COMMENT 'Engineering unit.',
+          value DOUBLE COMMENT 'Average value over the bucket.'""")
+def gld_asset_signal_series():
+    t = spark.read.table("slv_telemetry_process").where(F.col("value").isNotNull())
+    epoch = F.to_date(F.lit("2000-01-01"))
+    b = F.date_add(epoch, (F.floor(F.datediff(F.col("gas_day"), epoch) / 5) * 5).cast("int"))
+    return (t.withColumn("bucket", b).groupBy("asset_id", "signal", "bucket")
+            .agg(F.max("unit").alias("unit"), F.round(F.avg("value"), 3).alias("value"))
+            .select("asset_id", "signal", F.col("bucket").alias("gas_day"), "unit", "value"))
+
+
+@dp.table(name="gld_safety_events",
+          comment="Safety events worth an operator's attention: every ESD trip, F&G detection and emission exceedance, plus any other critical alarm, with a readable event label and the asset context. One row per event. Serves the App's Safety & Alarms list and Genie. Join key: event_id.",
+          schema="""event_id STRING NOT NULL COMMENT 'Event id.',
+          event_time TIMESTAMP COMMENT 'When the event happened.',
+          event_type STRING COMMENT 'Event type code.',
+          event STRING COMMENT 'Readable event: ESD trip, F&G detection, Emission exceedance or Critical alarm.',
+          asset_id STRING COMMENT 'Asset the event is on.',
+          area_code STRING COMMENT 'Site.',
+          equipment_type STRING COMMENT 'Equipment type.',
+          severity STRING COMMENT 'Severity (critical / warning / advisory).',
+          gas_day DATE COMMENT 'Gas day of the event.'""")
+def gld_safety_events():
+    ev = spark.read.table("slv_safety_events").where(
+        F.col("event_type").isin("esd_trip", "fg_detection", "emission_exceedance") | (F.col("severity") == "critical"))
+    label = (F.when(F.col("event_type") == "esd_trip", "ESD trip").when(F.col("event_type") == "fg_detection", "F&G detection")
+             .when(F.col("event_type") == "emission_exceedance", "Emission exceedance").otherwise("Critical alarm"))
+    return ev.select("event_id", "event_time", "event_type", label.alias("event"), "asset_id", "area_code",
+                     "equipment_type", "severity", "gas_day")
+
+
 # ===== GLD-03 app-serving marts (Lakebase-synced, write-back) ================================
 @dp.table(name="gld_asset_state", comment="Per-asset current health + 3D pin colour + geo + production-at-risk + open WOs/trips. The App's primary serving mart (synced to Lakebase). Advisory only.")
 def gld_asset_state():
@@ -536,7 +669,8 @@ def _last_days(df, n=30):
           utilisation_pct DOUBLE COMMENT 'Delivered as a share of MDQ (%).',
           revenue_per_day DOUBLE COMMENT 'Average revenue per gas day, latest 30 days (AUD/d).',
           delivered_pj_12m DOUBLE COMMENT 'Energy delivered over the latest 365 gas days (PJ).',
-          shortfall_days_30d INT COMMENT 'Gas days in the window delivered below nomination.'""")
+          shortfall_days_30d INT COMMENT 'Gas days in the window delivered below nomination.',
+          as_of_day STRING COMMENT 'Latest gas day in the delivery data: the end of the 30-day window.'""")
 def gld_customer_supply():
     c = spark.read.table("slv_customers")
     dl = spark.read.table("slv_customer_deliveries")
@@ -546,7 +680,7 @@ def gld_customer_supply():
         F.avg("price_gj").alias("px"),
         F.sum(F.when(F.col("delivered_tj") < F.col("nominated_tj") - 0.5, 1).otherwise(0)).alias("short"))
     y = _last_days(dl, 365).groupBy("customer_id").agg((F.sum("delivered_tj") / 1000.0).alias("pj12"))
-    o = c.join(w30, "customer_id", "left").join(y, "customer_id", "left")
+    o = c.join(w30, "customer_id", "left").join(y, "customer_id", "left").crossJoin(dl.agg(F.max("gas_day").alias("as_of_day")))
     return o.select(
         "customer_id", "customer_name", "segment", "location", "delivery_point", "contract_id", "contract_type",
         F.col("priority").cast("int").alias("priority"), F.round("mdq_tj", 1).alias("mdq_tj"), F.round("acq_pj", 2).alias("acq_pj"),
@@ -555,7 +689,8 @@ def gld_customer_supply():
         F.round("delivered_e3m3_d", 0).alias("delivered_e3m3_d"),
         F.round(F.col("delivered_tj_d") / F.col("mdq_tj") * 100, 1).alias("utilisation_pct"),
         F.round("revenue_per_day", 0).alias("revenue_per_day"), F.round("pj12", 2).alias("delivered_pj_12m"),
-        F.coalesce(F.col("short"), F.lit(0)).cast("int").alias("shortfall_days_30d"))
+        F.coalesce(F.col("short"), F.lit(0)).cast("int").alias("shortfall_days_30d"),
+        F.col("as_of_day").cast("string").alias("as_of_day"))
 
 
 @dp.table(name="gld_supply_network",

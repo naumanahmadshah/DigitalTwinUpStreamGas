@@ -7,7 +7,7 @@
 #   - the bundle resources (the app, the jobs, the medallion pipeline, and the bundle workspace folder)
 #   - the Genie space
 #   - the AI/BI dashboard
-#   - the Lakebase instance
+#   - the Lakebase project (and the synced tables, their sync pipeline and the scheduled sync job)
 #   - the catalog, schema, landing volume and ALL generated data (DROP CATALOG ... CASCADE)
 #   - a project-created SQL warehouse named "Gas Twin Warehouse" (a pre-existing/shared warehouse is left)
 #
@@ -22,7 +22,7 @@
 #   --catalog NAME      Catalog to drop (default: gas_upstream_digital_twin).
 #   --schema NAME       Schema (default: digital_twin).
 #   --warehouse ID      SQL warehouse to run the DROP on (default: auto-detect).
-#   --db-instance NAME  Lakebase instance to delete (default: gas-upstream-twin-db).
+#   --lakebase NAME     Lakebase project to delete (default: gas-upstream-twin-lakebase).
 #   --app-name NAME     App name (default: gas-upstream-twin).
 #   --yes               Skip the confirmation prompt (required for non-interactive use).
 #   -h | --help         Show this help.
@@ -34,7 +34,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/common.sh"
 
 CATALOG="gas_upstream_digital_twin"; SCHEMA="digital_twin"; PROFILE=""; HOST=""
-WAREHOUSE_ID=""; DB_INSTANCE="gas-upstream-twin-db"; APP_NAME="gas-upstream-twin"
+WAREHOUSE_ID=""; LAKEBASE_PROJECT="gas-upstream-twin-lakebase"; APP_NAME="gas-upstream-twin"
 GENIE_TITLE="Asset Intelligence Genie"; GENIE_OLD="Gas Upstream Digital Twin"; DASH_NAME="Gas Upstream Digital Twin"
 WH_NAME="Gas Twin Warehouse"   # the warehouse deploy.sh creates when a workspace has none
 ASSUME_YES=0
@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --catalog) CATALOG="$2"; shift 2;;
   --schema) SCHEMA="$2"; shift 2;;
   --warehouse) WAREHOUSE_ID="$2"; shift 2;;
-  --db-instance) DB_INSTANCE="$2"; shift 2;;
+  --lakebase) LAKEBASE_PROJECT="$2"; shift 2;;
   --app-name) APP_NAME="$2"; shift 2;;
   --yes|--force) ASSUME_YES=1; shift;;
   -h|--help) usage;;
@@ -60,7 +60,7 @@ fi
 
 cd "$ROOT"
 printf "%s\n" "$C_B== Gas Upstream Digital Twin - cleanup ==$C_0"
-info "catalog=$CATALOG  schema=$SCHEMA  app=$APP_NAME  db=$DB_INSTANCE  profile=$PROFILE"
+info "catalog=$CATALOG  schema=$SCHEMA  app=$APP_NAME  lakebase=$LAKEBASE_PROJECT  profile=$PROFILE"
 
 # Authenticate: if a --host was given, sign in to it; otherwise rely on the profile already being signed in.
 if [ -n "$HOST" ]; then
@@ -73,7 +73,7 @@ fi
 # Confirm (destructive). Bypass with --yes; refuse to run blind in a non-interactive shell.
 if [ "$ASSUME_YES" -ne 1 ]; then
   if [ -t 0 ]; then
-    printf "\n%sThis permanently deletes the app, dashboard, Genie space, Lakebase instance, pipeline, jobs,\nand the catalog '%s' with ALL its data.%s\nType 'yes' to proceed: " "$C_Y" "$CATALOG" "$C_0"
+    printf "\n%sThis permanently deletes the app, dashboard, Genie space, Lakebase project, pipelines, jobs,\nand the catalog '%s' with ALL its data.%s\nType 'yes' to proceed: " "$C_Y" "$CATALOG" "$C_0"
     read -r ans; [ "$ans" = "yes" ] || die "aborted."
   else
     die "Refusing to run non-interactively without --yes (this is destructive)."
@@ -86,7 +86,7 @@ if [ -z "$WAREHOUSE_ID" ]; then
   WAREHOUSE_ID="$(databricks warehouses list -o json -p "$PROFILE" 2>/dev/null | pyjson 'next((w["id"] for w in d if w.get("state")=="RUNNING"), (d[0]["id"] if d else ""))' || true)"
 fi
 [ -n "$WAREHOUSE_ID" ] && ok "warehouse: $WAREHOUSE_ID" || warn "no warehouse found; the catalog drop will be skipped (drop it manually if needed)"
-VARS="catalog=${CATALOG},schema=${SCHEMA},warehouse_id=${WAREHOUSE_ID},db_instance=${DB_INSTANCE},app_name=${APP_NAME}"
+VARS="catalog=${CATALOG},schema=${SCHEMA},warehouse_id=${WAREHOUSE_ID},lakebase_project=${LAKEBASE_PROJECT},app_name=${APP_NAME}"
 
 # ---- Bundle resources (app, jobs, pipeline + workspace folder) ------------------------------
 # Clear local bundle state so `destroy` re-fetches the deployment from the workspace. This avoids the
@@ -130,20 +130,48 @@ if [ -n "$DID" ]; then
   databricks lakeview trash "$DID" -p "$PROFILE" >/dev/null 2>&1 && ok "dashboard removed ($DID)" || warn "could not remove dashboard $DID"
 else ok "no dashboard to remove"; fi
 
-# ---- Lakebase instance ----------------------------------------------------------------------
-step "Removing the Lakebase instance"
-if dbapi get "/api/2.0/database/instances/${DB_INSTANCE}" | grep -q "\"name\"\|read_write_dns"; then
-  databricks database delete-database-instance "$DB_INSTANCE" --purge -p "$PROFILE" >/dev/null 2>&1 \
-    || databricks database delete-database-instance "$DB_INSTANCE" -p "$PROFILE" >/dev/null 2>&1 || true
-  ok "Lakebase instance '$DB_INSTANCE' removed"
-else ok "no Lakebase instance to remove"; fi
+# ---- Lakebase: scheduled sync job, synced tables (+ their pipeline), the project --------------
+step "Removing the Lakebase sync job, synced tables and project"
+SYNC_JOB="[${CATALOG}.${SCHEMA}] Gas Twin - Lakebase sync"
+JID="$(dbapi get "/api/2.1/jobs/list?name=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$SYNC_JOB")" | pyjson '(d.get("jobs") or [{}])[0].get("job_id","")')"
+if [ -n "$JID" ]; then
+  databricks jobs delete "$JID" -p "$PROFILE" >/dev/null 2>&1 && ok "sync job removed ($JID)" || warn "could not remove sync job $JID"
+else ok "no sync job to remove"; fi
+# Synced tables live in the <schema>_app UC schema. Deleting them removes their sync pipeline too.
+for t in $(databricks tables list "$CATALOG" "${SCHEMA}_app" -o json -p "$PROFILE" 2>/dev/null | pyjson '" ".join(x["name"] for x in d)'); do
+  databricks api delete "/api/2.0/postgres/synced_tables/${CATALOG}.${SCHEMA}_app.${t}" -p "$PROFILE" >/dev/null 2>&1 || true
+done
+ok "synced tables removed"
+# the sync pipeline is named "Synced table: <catalog>.<schema>_app.<first table> ..."
+PIDS="$(databricks pipelines list-pipelines -o json -p "$PROFILE" 2>/dev/null | python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+print(" ".join(p["pipeline_id"] for p in d if (p.get("name") or "").startswith("Synced table: " + sys.argv[1] + ".")))' "${CATALOG}.${SCHEMA}_app" 2>/dev/null || true)"
+for pid in $PIDS; do databricks pipelines delete "$pid" -p "$PROFILE" >/dev/null 2>&1 || true; done
+if dbapi get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}" | grep -q '"project_id"'; then
+  databricks api delete "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}" -p "$PROFILE" >/dev/null 2>&1 \
+    && ok "Lakebase project '$LAKEBASE_PROJECT' removed" || warn "could not remove Lakebase project '$LAKEBASE_PROJECT'"
+else ok "no Lakebase project to remove"; fi
 
-# ---- Catalog + all data ---------------------------------------------------------------------
-step "Dropping the catalog and all data"
+# ---- Data: the project's schemas, then the catalog only if nothing else is in it ----------------
+# The catalog may be an existing one shared with other work, so only this project's two schemas are
+# dropped; the catalog itself goes only when no other schema is left in it.
+step "Dropping the project's schemas and data"
 if [ -n "$WAREHOUSE_ID" ]; then
-  run_sql "DROP CATALOG IF EXISTS \`${CATALOG}\` CASCADE" && ok "catalog '$CATALOG' dropped (schema, volume and data gone)" \
-    || warn "could not drop catalog '$CATALOG' (drop it manually in the UI)"
-else warn "skipped catalog drop (no warehouse resolved)"; fi
+  for s in "${SCHEMA}_app" "$SCHEMA"; do
+    run_sql "DROP SCHEMA IF EXISTS \`${CATALOG}\`.\`${s}\` CASCADE" && ok "schema '${CATALOG}.${s}' dropped" \
+      || warn "could not drop schema '${CATALOG}.${s}' (drop it manually in the UI)"
+  done
+  OTHERS="$(databricks schemas list "$CATALOG" -o json -p "$PROFILE" 2>/dev/null | pyjson '" ".join(x["name"] for x in d if x["name"] not in ("information_schema","default"))')"
+  if [ -z "$(dbapi get "/api/2.1/unity-catalog/catalogs/${CATALOG}" | pyjson 'd.get("name","")')" ]; then
+    ok "catalog '$CATALOG' already gone"
+  elif [ -z "$OTHERS" ]; then
+    run_sql "DROP CATALOG IF EXISTS \`${CATALOG}\` CASCADE" && ok "catalog '$CATALOG' dropped (nothing else was in it)" \
+      || warn "kept catalog '$CATALOG' (no privilege to drop it; it is empty of project data)"
+  else
+    ok "kept catalog '$CATALOG': it also holds other schemas ($OTHERS)"
+  fi
+else warn "skipped dropping the schemas (no warehouse resolved)"; fi
 
 # ---- Project-created warehouse (only the one deploy.sh creates by name) ----------------------
 step "Removing a project-created warehouse (if any)"

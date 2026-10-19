@@ -6,8 +6,10 @@
   From a raw Windows computer with an internet connection and a Databricks workspace where you
   have workspace-admin rights, this script installs the Databricks CLI (if missing), signs you in,
   creates the catalog/schema/landing volume, finds or creates a serverless SQL warehouse, creates
-  the Lakebase instance, deploys the bundle, generates the data, runs the medallion, builds the
-  Genie space + dashboard, starts the app and prints the app URL + catalog + Genie link.
+  the Lakebase project (scale to zero; the app's only database), deploys the bundle, generates the
+  data, runs the medallion, lands the gold marts in Lakebase (synced tables, re-synced every 5
+  minutes), builds the Genie space + dashboard, starts the app and prints the app URL + catalog +
+  Genie link.
 
 .EXAMPLE
   .\scripts\deploy.ps1 -WorkspaceUrl https://your-workspace.cloud.databricks.com
@@ -17,7 +19,8 @@ param(
   [string]$Catalog      = "gas_upstream_digital_twin",
   [string]$Schema       = "digital_twin",
   [string]$Warehouse    = "",
-  [string]$DbInstance   = "gas-upstream-twin-db",
+  [string]$Lakebase     = "gas-upstream-twin-lakebase",
+  [string]$SyncCron     = "0 0/5 * * * ?",
   [string]$AppName      = "gas-upstream-twin",
   [string]$Profile      = "",
   [switch]$SkipData
@@ -32,9 +35,9 @@ $DashName   = "Gas Upstream Digital Twin"   # must match NAME in serving/build_d
 if ($WorkspaceUrl) { $m = [regex]::Match($WorkspaceUrl, '^(https?://[^/?]+)'); if ($m.Success) { $WorkspaceUrl = $m.Groups[1].Value } }
 
 Write-Host "== Gas Upstream Digital Twin - deploy ==" -ForegroundColor White
-Info "catalog=$Catalog  schema=$Schema  app=$AppName  db=$DbInstance"
+Info "catalog=$Catalog  schema=$Schema  app=$AppName  lakebase=$Lakebase"
 
-function Vars { "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,db_instance=$DbInstance,app_name=$AppName" }
+function Vars { "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,lakebase_project=$Lakebase,sync_cron=$SyncCron,app_name=$AppName" }
 function BDeploy { & databricks bundle deploy -t main -p $Profile --var (Vars); if ($LASTEXITCODE -ne 0) { Die "bundle deploy failed" } }
 # BRun streams CLI output to the host (not captured) and leaves the exit code in $LASTEXITCODE,
 # which the caller checks. Do not capture BRun's output, or the CLI progress would be swallowed.
@@ -84,7 +87,7 @@ if ((Test-Path $StateMarker) -and $WsHost -and ((Get-Content $StateMarker -Raw -
   Remove-Item -Recurse -Force .databricks -ErrorAction SilentlyContinue
 }
 
-# ---- Phase 2: SQL warehouse (used for DDL below + by the app) --------------------------------
+# ---- Phase 2: SQL warehouse (used for DDL below, Genie and the dashboard; not by the app) -----
 Step "Phase 2: SQL warehouse"
 if (-not $Warehouse) {
   $whs = Db-Json warehouses list -o json -p $Profile
@@ -102,40 +105,56 @@ if (-not $Warehouse) {
 }
 Ok "warehouse: $Warehouse"
 
-# ---- Phase 2b: catalog, schema, landing volume (via SQL - Default-Storage-safe) --------------
+# ---- Phase 3: catalog, schema, landing volume (via SQL - Default-Storage-safe) --------------
 # The landing volume must exist before data generation: batch_sources writes files into it, and
 # os.makedirs cannot create the UC volume object itself.
 Step "Phase 3: catalog, schema and landing volume"
-if (Run-Sql "CREATE CATALOG IF NOT EXISTS ``$Catalog``") { Ok "catalog '$Catalog' ready" }
+# Use an existing catalog / schema as is: CREATE ... IF NOT EXISTS still needs the CREATE privilege
+# (checked before existence), which a user given an existing catalog often does not have.
+function Uc-Exists([string]$Kind, [string]$Name) { $o = Db-Json api get "/api/2.1/unity-catalog/$Kind/$Name" -p $Profile; return [bool]($o -and $o.name) }
+if (Uc-Exists 'catalogs' $Catalog) { Ok "using existing catalog '$Catalog'" }
+elseif (Run-Sql "CREATE CATALOG IF NOT EXISTS ``$Catalog``") { Ok "catalog '$Catalog' created" }
 else { Die "Could not create catalog '$Catalog'. If your account uses Default Storage, create it once in the UI
       (Catalog > Create catalog, Default Storage) or pass -Catalog <existing>, then re-run." }
-if (Run-Sql "CREATE SCHEMA IF NOT EXISTS ``$Catalog``.``$Schema``") { Ok "schema '$Schema' ready" } else { Die "Could not create schema '$Catalog.$Schema'." }
+if (Uc-Exists 'schemas' "$Catalog.$Schema") { Ok "using existing schema '$Schema'" }
+elseif (Run-Sql "CREATE SCHEMA IF NOT EXISTS ``$Catalog``.``$Schema``") { Ok "schema '$Schema' ready" }
+else { Die "Could not create schema '$Catalog.$Schema'. You need USE CATALOG and CREATE SCHEMA on '$Catalog'." }
 if (Run-Sql "CREATE VOLUME IF NOT EXISTS ``$Catalog``.``$Schema``.landing") { Ok "volume 'landing' ready" } else { Die "Could not create volume '$Catalog.$Schema.landing'." }
 
-# ---- Phase 3: Lakebase instance -------------------------------------------------------------
-Step "Phase 4: Lakebase instance (write-back)"
-$inst = Db-Json api get "/api/2.0/database/instances/$DbInstance" -p $Profile
-$PgHost = if ($inst) { $inst.read_write_dns } else { "" }
-if (-not $PgHost) {
-  Info "creating Lakebase instance '$DbInstance' (provisioning takes a few minutes)..."
-  & databricks database create-database-instance $DbInstance --capacity CU_1 -p $Profile *> $null
+# ---- Phase 4: Lakebase project (the app's only database; needed before the app binds to it) --
+# Lakebase Autoscaling: 0.5 to 4 CU, and the compute scales to zero after 5 idle minutes.
+Step "Phase 4: Lakebase project (scale to zero)"
+$PgSchema = "${Schema}_app"   # the gold marts land here as Lakebase synced tables (same names as in gold)
+function Lb-Endpoint {
+  $eps = Db-Json api get "/api/2.0/postgres/projects/$Lakebase/branches/production/endpoints" -p $Profile
+  if ($eps -and $eps.endpoints) {
+    $e = $eps.endpoints | Where-Object { $_.status.endpoint_type -eq 'ENDPOINT_TYPE_READ_WRITE' } | Select-Object -First 1
+    if ($e) { return $e.name }
+  }
+  return ""
+}
+$PgEndpoint = Lb-Endpoint
+if (-not $PgEndpoint) {
+  Info "creating Lakebase project '$Lakebase' (takes a minute)..."
+  $body = @{ spec = @{ display_name = $Lakebase; pg_version = 16; default_endpoint_settings = @{
+            autoscaling_limit_min_cu = 0.5; autoscaling_limit_max_cu = 4; suspend_timeout_duration = '300s' } } } | ConvertTo-Json -Depth 5 -Compress
+  & databricks api post "/api/2.0/postgres/projects?project_id=$Lakebase" --json $body -p $Profile *> $null
   for ($i=0; $i -lt 40; $i++) {
-    $inst = Db-Json api get "/api/2.0/database/instances/$DbInstance" -p $Profile
-    $PgHost = if ($inst) { $inst.read_write_dns } else { "" }
-    if ($PgHost) { break }
-    Start-Sleep -Seconds 15
+    $PgEndpoint = Lb-Endpoint
+    if ($PgEndpoint) { break }
+    Start-Sleep -Seconds 10
   }
 }
-if (-not $PgHost) { Die "Lakebase instance '$DbInstance' did not become ready. Lakebase (Database Instances) must be
+if (-not $PgEndpoint) { Die "Lakebase project '$Lakebase' did not become ready. Lakebase Autoscaling must be
       available in this workspace/region. See docs/TROUBLESHOOTING.md, then re-run." }
-Ok "Lakebase host: $PgHost"
+Ok "Lakebase endpoint: $PgEndpoint"
 
-# ---- Phase 4: render app.yaml + deploy bundle -----------------------------------------------
+# ---- Phase 5: render app.yaml + deploy bundle -----------------------------------------------
 Step "Phase 5: deploy bundle (pipeline, jobs, app)"
 function Render-AppYaml([string]$GenieId) {
   (Get-Content (Join-Path $Root 'app\app.yaml.tmpl') -Raw).
-    Replace('__CATALOG__',$Catalog).Replace('__SCHEMA__',$Schema).
-    Replace('__DB_INSTANCE__',$DbInstance).Replace('__PGHOST__',$PgHost).
+    Replace('__SCHEMA__',$Schema).Replace('__PG_SCHEMA__',$PgSchema).
+    Replace('__PG_ENDPOINT__',$PgEndpoint).
     Replace('__GENIE_SPACE__',$GenieId) | Set-Content (Join-Path $Root 'app\app.yaml') -NoNewline
 }
 Render-AppYaml ""
@@ -145,31 +164,30 @@ Ok "bundle deployed"
 New-Item -ItemType Directory -Force -Path .databricks | Out-Null
 Set-Content -Path $StateMarker -Value $WsHost -NoNewline -ErrorAction SilentlyContinue
 
-$app = Db-Json api get "/api/2.0/apps/$AppName" -p $Profile
-$AppSp = if ($app) { $app.service_principal_client_id } else { "" }
-if ($AppSp) {
-  Run-Sql "GRANT USE CATALOG ON CATALOG ``$Catalog`` TO ``$AppSp``" | Out-Null
-  Run-Sql "GRANT USE SCHEMA ON SCHEMA ``$Catalog``.``$Schema`` TO ``$AppSp``" | Out-Null
-  Run-Sql "GRANT SELECT ON SCHEMA ``$Catalog``.``$Schema`` TO ``$AppSp``" | Out-Null
-  Ok "granted app service principal SELECT on $Catalog.$Schema"
-} else { Warn "could not resolve the app service principal yet; grants retried on next deploy" }
-
-# ---- Phase 5: data generation ---------------------------------------------------------------
+# ---- Phase 6: data generation ---------------------------------------------------------------
 if (-not $SkipData) {
   Step "Phase 6: generating data (longest step, ~10-20 min)"
-  & (Join-Path $Here 'generate_data.ps1') -Profile $Profile -Catalog $Catalog -Schema $Schema -Warehouse $Warehouse -DbInstance $DbInstance -AppName $AppName
+  & (Join-Path $Here 'generate_data.ps1') -Profile $Profile -Catalog $Catalog -Schema $Schema -Warehouse $Warehouse -Lakebase $Lakebase -AppName $AppName
   if ($LASTEXITCODE -ne 0) { Die "data generation failed" }
   Ok "data generated"
 } else { Warn "Phase 6: skipping data generation (-SkipData)" }
 
-# ---- Phase 6: medallion ---------------------------------------------------------------------
+# ---- Phase 7: medallion ---------------------------------------------------------------------
 Step "Phase 7: medallion pipeline (bronze -> silver -> gold)"
 BRun 'medallion' @('--full-refresh-all')
 if ($LASTEXITCODE -ne 0) { Die "medallion pipeline failed" }
 Ok "medallion complete"
 
-# ---- Phase 7: surfaces ----------------------------------------------------------------------
-Step "Phase 8: Genie space + AI/BI dashboard"
+# ---- Phase 8: Lakebase sync, right after the medallion -----------------------------------------
+# One synced table per gold mart (one sync pipeline), synced now; seeds the recommendation write-back
+# table, grants the app, and creates the "Lakebase sync" job that re-runs the sync every 5 minutes.
+Step "Phase 8: land the gold marts in Lakebase (synced tables) + schedule the re-sync"
+BRun 'lakebase_sync' @()
+if ($LASTEXITCODE -ne 0) { Die "The Lakebase sync failed, so the app would have no data. See docs/TROUBLESHOOTING.md, then re-run." }
+Ok "gold marts synced to Lakebase (Postgres schema $PgSchema); re-sync scheduled"
+
+# ---- Phase 9: surfaces (Genie + dashboard, over gold in the lakehouse) -----------------------
+Step "Phase 9: Genie space + AI/BI dashboard"
 BRun 'surfaces' @()
 if ($LASTEXITCODE -eq 0) { Ok "surfaces built" } else { Warn "surfaces hit an issue; the app still works. See docs/TROUBLESHOOTING.md." }
 # A newly created Genie space can take a few seconds to appear in the spaces list, so poll for it.
@@ -184,19 +202,14 @@ for ($i = 0; $i -lt 12; $i++) {
 }
 if ($GenieId) { Ok "Genie space: $GenieId" } else { Warn "Genie space id not found; the app's Genie lamp link will be hidden until a redeploy finds it." }
 
-# ---- Phase 8: start the app, wired to Genie -------------------------------------------------
-Step "Phase 9: start the app"
+# ---- Phase 10: start the app, wired to Genie + Lakebase -------------------------------------
+Step "Phase 10: start the app"
 Render-AppYaml $GenieId
 BDeploy
 BRun 'app' @()
 if ($LASTEXITCODE -ne 0) { Die "app failed to start" }
 
-# ---- Phase 9: Lakebase seed -----------------------------------------------------------------
-Step "Phase 10: seed Lakebase (write-back table + grants)"
-BRun 'lakebase_seed' @()
-if ($LASTEXITCODE -eq 0) { Ok "Lakebase seeded" } else { Warn "Lakebase seed hit an issue; write-back may be read-only. See docs/TROUBLESHOOTING.md." }
-
-# ---- Phase 10: summary ----------------------------------------------------------------------
+# ---- Summary -------------------------------------------------------------------------------
 $app = Db-Json api get "/api/2.0/apps/$AppName" -p $Profile
 $AppUrl = if ($app) { $app.url } else { "" }
 # $WsHost was resolved in Phase 1.
@@ -208,7 +221,8 @@ Write-Host ("  App:        " + ($(if ($AppUrl) { $AppUrl } else { "(open Compute
 Write-Host ("  Catalog:    $Catalog.$Schema   (open Catalog to browse the marts)")
 if ($GenieId -and $WsHost) { Write-Host ("  Genie:      $WsHost/one/agents/$GenieId") }
 Write-Host ("  Dashboard:  open Dashboards > `"$DashName`"")
-Write-Host ("  Warehouse:  $Warehouse")
+Write-Host ("  Lakebase:   $Lakebase  (Postgres schema $PgSchema; re-sync job `"[$Catalog.$Schema] Gas Twin - Lakebase sync`")")
+Write-Host ("  Warehouse:  $Warehouse  (Genie + dashboard)")
 Write-Host ""
 Write-Host "  New here? Read docs/NAVIGATION.md for a guided tour of the app."
 Write-Host ""

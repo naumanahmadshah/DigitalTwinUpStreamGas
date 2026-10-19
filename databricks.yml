@@ -1,7 +1,8 @@
 # Databricks Asset Bundle: Gas Upstream Digital Twin.
 # A self-contained, end-to-end upstream gas digital twin: synthetic OT/IT data generation,
 # a bronze -> silver -> gold medallion (Lakeflow DLT), a FastAPI + single-page application,
-# a curated Genie space, an AI/BI dashboard, and Lakebase write-back.
+# a curated Genie space, an AI/BI dashboard, and Lakebase (the app's only database: the gold marts are
+# synced into it, and recommendation decisions are written back to it).
 #
 # Everything is parameterised by a target catalog + schema. Deploy with the master scripts in
 # scripts/ (scripts/deploy.sh on macOS/Linux, scripts/deploy.ps1 on Windows), which create the
@@ -21,11 +22,14 @@ variables:
     description: Target schema inside the catalog (all twin tables, marts and the landing volume live here).
     default: digital_twin
   warehouse_id:
-    description: SQL warehouse id for the app, Genie and the dashboard. Auto-detected or created by the deploy script.
+    description: SQL warehouse id for Genie, the dashboard and the deploy's SQL steps (the app itself uses only Lakebase). Auto-detected or created by the deploy script.
     default: ""
-  db_instance:
-    description: Lakebase (Postgres) database instance used for recommendation write-back.
-    default: gas-upstream-twin-db
+  lakebase_project:
+    description: Lakebase Autoscaling project (scale to zero) that serves the app. Created by the deploy script.
+    default: gas-upstream-twin-lakebase
+  sync_cron:
+    description: Quartz cron for the scheduled gold-to-Lakebase re-sync (default every 5 minutes; empty = no schedule).
+    default: "0 0/5 * * * ?"
   app_name:
     description: Databricks App name (must be unique in the workspace, lowercase with hyphens).
     default: gas-upstream-twin
@@ -43,7 +47,7 @@ sync:
     - "*.md"
 
 targets:
-  # A single default target. The deploy scripts pass the catalog/schema/warehouse/db_instance
+  # A single default target. The deploy scripts pass the catalog/schema/warehouse/lakebase_project
   # as --var overrides, so one target serves every workspace. No `mode` is set, so resources
   # deploy with their literal names (no dev-prefixing) and no schedule pausing.
   main:

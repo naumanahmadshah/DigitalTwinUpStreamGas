@@ -17,7 +17,8 @@ MARTS = ["gld_field_production", "gld_well_scorecard", "gld_compression_health",
          "gld_constraint_ranking", "gld_recommendations", "gld_asset_state",
          "gld_pred_liquid_loading", "gld_pred_rul",
          "gld_lab_assay", "gld_commercial", "gld_weather",
-         "gld_customer_supply", "gld_supply_network", "gld_supply_nodes"]
+         "gld_customer_supply", "gld_supply_network", "gld_supply_nodes",
+         "gld_tag_context", "gld_sites", "gld_safety_events"]
 
 QUESTIONS = [
     "Which five wells lost the most gas to deferment last month, and what was the coded cause and dollar impact?",

@@ -5,7 +5,8 @@
 .DESCRIPTION
   Removes EVERYTHING this project created and returns the workspace to a clean, pre-deploy state so
   .\scripts\deploy.ps1 can run fresh. It removes the bundle resources (app, jobs, medallion pipeline,
-  and the bundle workspace folder), the Genie space, the AI/BI dashboard, the Lakebase instance, and
+  and the bundle workspace folder), the Genie space, the AI/BI dashboard, the Lakebase project (with its synced tables, sync pipeline and
+  scheduled sync job), and
   the catalog + schema + landing volume + ALL generated data (DROP CATALOG ... CASCADE). A
   project-created warehouse named "Gas Twin Warehouse" is removed; a pre-existing/shared one is left.
 
@@ -17,7 +18,7 @@ param(
   [string]$Catalog    = "gas_upstream_digital_twin",
   [string]$Schema     = "digital_twin",
   [string]$Warehouse  = "",
-  [string]$DbInstance = "gas-upstream-twin-db",
+  [string]$Lakebase   = "gas-upstream-twin-lakebase",
   [string]$AppName    = "gas-upstream-twin",
   [string]$Profile    = "",
   [switch]$Yes
@@ -36,7 +37,7 @@ if ($WorkspaceUrl) { $m = [regex]::Match($WorkspaceUrl, '^(https?://[^/?]+)'); i
 if (-not $Profile) { if ($WorkspaceUrl) { $Profile = Twin-Profile $WorkspaceUrl } else { $Profile = 'gas-twin' } }
 
 Write-Host "== Gas Upstream Digital Twin - cleanup ==" -ForegroundColor White
-Info "catalog=$Catalog  schema=$Schema  app=$AppName  db=$DbInstance  profile=$Profile"
+Info "catalog=$Catalog  schema=$Schema  app=$AppName  lakebase=$Lakebase  profile=$Profile"
 
 # Authenticate: if a -WorkspaceUrl was given, sign in to it; otherwise rely on an existing sign-in.
 if ($WorkspaceUrl) {
@@ -67,7 +68,7 @@ if ($Warehouse) { Ok "warehouse: $Warehouse" } else { Warn "no warehouse found; 
 # ---- Bundle resources -----------------------------------------------------------------------
 Step "Removing bundle resources (app, jobs, pipeline)"
 Remove-Item -Recurse -Force .databricks -ErrorAction SilentlyContinue
-$Vars = "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,db_instance=$DbInstance,app_name=$AppName"
+$Vars = "catalog=$Catalog,schema=$Schema,warehouse_id=$Warehouse,lakebase_project=$Lakebase,app_name=$AppName"
 & databricks bundle destroy -t main -p $Profile --var $Vars --auto-approve *> $null
 if ($LASTEXITCODE -eq 0) { Ok "bundle resources removed" } else { Warn "no bundle deployment found (or already removed)" }
 # App deletion is asynchronous; wait for it so "cleanup complete" is truthful and an immediate
@@ -103,21 +104,43 @@ if ($dash) {
 }
 if ($did) { & databricks lakeview trash $did -p $Profile *> $null; Ok "dashboard removed ($did)" } else { Ok "no dashboard to remove" }
 
-# ---- Lakebase instance ----------------------------------------------------------------------
-Step "Removing the Lakebase instance"
-$inst = Db-Json api get "/api/2.0/database/instances/$DbInstance" -p $Profile
-if ($inst) {
-  & databricks database delete-database-instance $DbInstance --purge -p $Profile *> $null
-  if ($LASTEXITCODE -ne 0) { & databricks database delete-database-instance $DbInstance -p $Profile *> $null }
-  Ok "Lakebase instance '$DbInstance' removed"
-} else { Ok "no Lakebase instance to remove" }
+# ---- Lakebase: scheduled sync job, synced tables (+ their pipeline), the project --------------
+Step "Removing the Lakebase sync job, synced tables and project"
+$SyncJob = "[$Catalog.$Schema] Gas Twin - Lakebase sync"
+$jl = Db-Json api get ("/api/2.1/jobs/list?name=" + [uri]::EscapeDataString($SyncJob)) -p $Profile
+if ($jl -and $jl.jobs) { & databricks jobs delete $jl.jobs[0].job_id -p $Profile *> $null; Ok ("sync job removed (" + $jl.jobs[0].job_id + ")") } else { Ok "no sync job to remove" }
+# Synced tables live in the <schema>_app UC schema. Deleting them removes their sync pipeline too.
+$ServingSchema = "${Schema}_app"
+$tabs = Db-Json tables list $Catalog $ServingSchema -o json -p $Profile
+if ($tabs) { foreach ($t in $tabs) { & databricks api delete "/api/2.0/postgres/synced_tables/$Catalog.$ServingSchema.$($t.name)" -p $Profile *> $null } }
+Ok "synced tables removed"
+# the sync pipeline is named "Synced table: <catalog>.<schema>_app.<first table> ..."
+$pls = Db-Json pipelines list-pipelines -o json -p $Profile
+if ($pls) { $pls | Where-Object { $_.name -like "Synced table: $Catalog.$ServingSchema.*" } | ForEach-Object { & databricks pipelines delete $_.pipeline_id -p $Profile *> $null } }
+$proj = Db-Json api get "/api/2.0/postgres/projects/$Lakebase" -p $Profile
+if ($proj) {
+  & databricks api delete "/api/2.0/postgres/projects/$Lakebase" -p $Profile *> $null
+  if ($LASTEXITCODE -eq 0) { Ok "Lakebase project '$Lakebase' removed" } else { Warn "could not remove Lakebase project '$Lakebase'" }
+} else { Ok "no Lakebase project to remove" }
 
-# ---- Catalog + all data ---------------------------------------------------------------------
-Step "Dropping the catalog and all data"
+# ---- Data: the project's schemas, then the catalog only if nothing else is in it ----------------
+# The catalog may be an existing one shared with other work, so only this project's two schemas are
+# dropped; the catalog itself goes only when no other schema is left in it.
+Step "Dropping the project's schemas and data"
 if ($Warehouse) {
-  if (Run-Sql "DROP CATALOG IF EXISTS ``$Catalog`` CASCADE") { Ok "catalog '$Catalog' dropped (schema, volume and data gone)" }
-  else { Warn "could not drop catalog '$Catalog' (drop it manually in the UI)" }
-} else { Warn "skipped catalog drop (no warehouse resolved)" }
+  foreach ($s in @("${Schema}_app", $Schema)) {
+    if (Run-Sql "DROP SCHEMA IF EXISTS ``$Catalog``.``$s`` CASCADE") { Ok "schema '$Catalog.$s' dropped" }
+    else { Warn "could not drop schema '$Catalog.$s' (drop it manually in the UI)" }
+  }
+  $cat = Db-Json api get "/api/2.1/unity-catalog/catalogs/$Catalog" -p $Profile
+  $sch = Db-Json schemas list $Catalog -o json -p $Profile
+  $others = @(); if ($sch) { $others = @($sch | Where-Object { $_.name -notin @('information_schema','default') } | ForEach-Object { $_.name }) }
+  if (-not ($cat -and $cat.name)) { Ok "catalog '$Catalog' already gone" }
+  elseif ($others.Count -eq 0) {
+    if (Run-Sql "DROP CATALOG IF EXISTS ``$Catalog`` CASCADE") { Ok "catalog '$Catalog' dropped (nothing else was in it)" }
+    else { Warn "kept catalog '$Catalog' (no privilege to drop it; it is empty of project data)" }
+  } else { Ok ("kept catalog '$Catalog': it also holds other schemas (" + ($others -join ', ') + ")") }
+} else { Warn "skipped dropping the schemas (no warehouse resolved)" }
 
 # ---- Project-created warehouse --------------------------------------------------------------
 Step "Removing a project-created warehouse (if any)"

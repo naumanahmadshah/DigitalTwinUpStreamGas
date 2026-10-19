@@ -5,10 +5,10 @@
 # AREA-SYSTEM-CLASS-NNNN, wells, PVT, gathering topology, 3D scenes). The medallion and the two
 # surfaces (App + Genie) bind to the tag_id contract this produces.
 #
-# Cardinality follows Design Part 9.8 (one hero field): ~100 producing wells across 12 pads,
-# one CPF with two trains (six compressors, TEG dehydration, amine/AGRU, NGL, utilities, flare),
-# and two custody/export metering stations. Tag counts are scaled to a demo-sane size while the
-# physics stays real (Part 9.10 "hydraulics fidelity: high").
+# Cardinality is a large-operator footprint across the Australian basins: 500 producing wells on 50
+# pads, 12 gathering hubs, two CPFs with five processing trains (15 compressors, TEG dehydration,
+# amine/AGRU, NGL, utilities, flare), four custody/export metering stations and 28 (fictional)
+# customers. Tag counts are scaled to a demo-sane size while the physics stays real.
 
 seed: 20260930            # deterministic: same seed => same field, same trips, same numbers
 

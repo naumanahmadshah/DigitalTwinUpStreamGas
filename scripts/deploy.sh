@@ -6,14 +6,15 @@
 # workspace-admin rights, this script:
 #   0. installs the Databricks CLI if it is missing and signs you in (OAuth, opens a browser)
 #   1. creates the target catalog, schema and landing volume
-#   2. finds or creates a serverless SQL warehouse
-#   3. creates the Lakebase (Postgres) instance used for write-back
+#   2. finds or creates a serverless SQL warehouse (for the SQL steps, Genie and the dashboard)
+#   3. creates the Lakebase project (scale to zero): the app's only database
 #   4. deploys the asset bundle (pipeline, jobs, app)
 #   5. fires the data-generation job (scripts/generate_data.sh)
 #   6. runs the medallion pipeline (bronze -> silver -> gold)
-#   7. builds the Genie space + AI/BI dashboard
-#   8. starts the app and wires it to Genie + Lakebase
-#   9. prints the app URL, catalog and Genie link
+#   7. lands the gold marts in Lakebase (synced tables), then schedules a re-sync every 5 minutes
+#   8. builds the Genie space + AI/BI dashboard (these read gold in the lakehouse)
+#   9. starts the app and wires it to Genie + Lakebase
+#  10. prints the app URL, catalog and Genie link
 #
 # Usage:
 #   scripts/deploy.sh --host https://<workspace>.cloud.databricks.com [options]
@@ -23,7 +24,9 @@
 #   --catalog NAME      Target catalog (default: gas_upstream_digital_twin).
 #   --schema NAME       Target schema  (default: digital_twin).
 #   --warehouse ID      Use an existing SQL warehouse id (default: auto-detect or create one).
-#   --db-instance NAME  Lakebase instance name (default: gas-upstream-twin-db).
+#   --lakebase NAME     Lakebase project id (default: gas-upstream-twin-lakebase).
+#   --sync-cron CRON    Quartz cron for the gold-to-Lakebase re-sync (default "0 0/5 * * * ?",
+#                       every 5 minutes; pass "" for no schedule).
 #   --app-name NAME     Databricks App name (default: gas-upstream-twin).
 #   --profile NAME      CLI auth profile to use/create (default: derived from the workspace URL,
 #                       e.g. gastwin-dbc-xxxx, so each workspace gets its own profile).
@@ -42,7 +45,8 @@ SCHEMA="digital_twin"
 PROFILE=""   # empty = derive a per-workspace profile from --host (see Phase 1)
 HOST=""
 WAREHOUSE_ID=""
-DB_INSTANCE="gas-upstream-twin-db"
+LAKEBASE_PROJECT="gas-upstream-twin-lakebase"
+SYNC_CRON="0 0/5 * * * ?"
 APP_NAME="gas-upstream-twin"
 GENIE_TITLE="Asset Intelligence Genie"    # must match TITLE in serving/build_genie.py
 DASH_NAME="Gas Upstream Digital Twin"       # must match NAME in serving/build_dashboard.py
@@ -54,7 +58,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --catalog) CATALOG="$2"; shift 2;;
   --schema) SCHEMA="$2"; shift 2;;
   --warehouse) WAREHOUSE_ID="$2"; shift 2;;
-  --db-instance) DB_INSTANCE="$2"; shift 2;;
+  --lakebase) LAKEBASE_PROJECT="$2"; shift 2;;
+  --sync-cron) SYNC_CRON="$2"; shift 2;;
   --app-name) APP_NAME="$2"; shift 2;;
   --profile) PROFILE="$2"; shift 2;;
   --skip-data) RUN_DATA=0; shift;;
@@ -64,10 +69,10 @@ esac; done
 
 cd "$ROOT"
 printf "%s\n" "$C_B== Gas Upstream Digital Twin: deploy ==$C_0"
-info "catalog=$CATALOG  schema=$SCHEMA  app=$APP_NAME  db=$DB_INSTANCE"
+info "catalog=$CATALOG  schema=$SCHEMA  app=$APP_NAME  lakebase=$LAKEBASE_PROJECT"
 
 # VARS passed to every bundle command. Rebuilt after the warehouse is resolved.
-build_vars() { VARS="catalog=${CATALOG},schema=${SCHEMA},warehouse_id=${WAREHOUSE_ID},db_instance=${DB_INSTANCE},app_name=${APP_NAME}"; }
+build_vars() { VARS="catalog=${CATALOG},schema=${SCHEMA},warehouse_id=${WAREHOUSE_ID},lakebase_project=${LAKEBASE_PROJECT},sync_cron=${SYNC_CRON},app_name=${APP_NAME}"; }
 bdeploy() { databricks bundle deploy -t main -p "$PROFILE" --var "$VARS"; }
 brun()    { databricks bundle run "$1" -t main -p "$PROFILE" --var "$VARS" "${@:2}"; }
 # dbapi always exits 0 (callers tolerate a missing resource) so `set -e` never aborts on a 404.
@@ -122,7 +127,7 @@ if [ -f "$STATE_MARKER" ] && [ -n "$WS_HOST" ] && [ "$(cat "$STATE_MARKER" 2>/de
   rm -rf .databricks
 fi
 
-# ---- Phase 2: SQL warehouse (used for DDL below + by the app) --------------------------------
+# ---- Phase 2: SQL warehouse (used for DDL below, Genie and the dashboard; not by the app) -----
 step "Phase 2: SQL warehouse"
 if [ -z "$WAREHOUSE_ID" ]; then
   WAREHOUSE_ID="$(databricks warehouses list -o json -p "$PROFILE" 2>/dev/null | pyjson 'next((w["id"] for w in d if w.get("state")=="RUNNING"), (d[0]["id"] if d else ""))' || true)"
@@ -135,42 +140,58 @@ fi
 ok "warehouse: $WAREHOUSE_ID"
 build_vars
 
-# ---- Phase 2b: catalog, schema, landing volume (via SQL: Default-Storage-safe) --------------
+# ---- Phase 3: catalog, schema, landing volume (via SQL: Default-Storage-safe) --------------
 # The landing volume must exist before data generation: batch_sources writes files into it, and
 # os.makedirs cannot create the UC volume object itself.
 step "Phase 3: catalog, schema and landing volume"
-run_sql "CREATE CATALOG IF NOT EXISTS \`${CATALOG}\`" \
-  || die "Could not create catalog '$CATALOG'. If your account uses Default Storage you may need to
+# Use an existing catalog / schema as is: CREATE ... IF NOT EXISTS still needs the CREATE privilege
+# (checked before existence), which a user given an existing catalog often does not have.
+uc_exists() { dbapi get "/api/2.1/unity-catalog/$1/$2" | pyjson '"1" if d.get("name") else ""'; }
+if [ -n "$(uc_exists catalogs "$CATALOG")" ]; then
+  ok "using existing catalog '$CATALOG'"
+else
+  run_sql "CREATE CATALOG IF NOT EXISTS \`${CATALOG}\`" \
+    || die "Could not create catalog '$CATALOG'. If your account uses Default Storage you may need to
       create it once in the UI (Catalog > Create catalog, Default Storage), or pass --catalog <existing>, then re-run."
-ok "catalog '$CATALOG' ready"
-run_sql "CREATE SCHEMA IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`" || die "Could not create schema '${CATALOG}.${SCHEMA}'."
-ok "schema '$SCHEMA' ready"
+  ok "catalog '$CATALOG' created"
+fi
+if [ -n "$(uc_exists schemas "${CATALOG}.${SCHEMA}")" ]; then
+  ok "using existing schema '$SCHEMA'"
+else
+  run_sql "CREATE SCHEMA IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`" \
+    || die "Could not create schema '${CATALOG}.${SCHEMA}'. You need USE CATALOG and CREATE SCHEMA on '$CATALOG'."
+  ok "schema '$SCHEMA' ready"
+fi
 run_sql "CREATE VOLUME IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`.landing" || die "Could not create volume '${CATALOG}.${SCHEMA}.landing'."
 ok "volume 'landing' ready"
 
-# ---- Phase 2c: Lakebase instance (needed before the app binds to it) ------------------------
-step "Phase 4: Lakebase instance (write-back)"
-PGHOST="$(dbapi get "/api/2.0/database/instances/${DB_INSTANCE}" | pyjson 'd.get("read_write_dns","")')"
-if [ -z "$PGHOST" ]; then
-  info "creating Lakebase instance '$DB_INSTANCE' (provisioning takes a few minutes)…"
-  databricks database create-database-instance "$DB_INSTANCE" --capacity CU_1 -p "$PROFILE" >/dev/null 2>&1 \
-    || databricks database create-database-instance "$DB_INSTANCE" --capacity CU_1 --node-count 1 -p "$PROFILE" >/dev/null 2>&1 \
-    || warn "create call returned non-zero (it may already be provisioning)"
+# ---- Phase 4: Lakebase project (the app's only database; needed before the app binds to it) --
+# Lakebase Autoscaling: 0.5 to 4 CU, and the compute scales to zero after 5 idle minutes.
+step "Phase 4: Lakebase project (scale to zero)"
+PG_SCHEMA="${SCHEMA}_app"   # the gold marts land here as Lakebase synced tables (same names as in gold)
+lb_endpoint() { dbapi get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}/branches/production/endpoints" \
+  | pyjson 'next((e["name"] for e in d.get("endpoints",[]) if e.get("status",{}).get("endpoint_type")=="ENDPOINT_TYPE_READ_WRITE"),"")'; }
+PG_ENDPOINT="$(lb_endpoint)"
+if [ -z "$PG_ENDPOINT" ]; then
+  info "creating Lakebase project '$LAKEBASE_PROJECT' (takes a minute)…"
+  databricks api post "/api/2.0/postgres/projects?project_id=${LAKEBASE_PROJECT}" -p "$PROFILE" --json \
+    "{\"spec\":{\"display_name\":\"${LAKEBASE_PROJECT}\",\"pg_version\":16,\"default_endpoint_settings\":{\"autoscaling_limit_min_cu\":0.5,\"autoscaling_limit_max_cu\":4,\"suspend_timeout_duration\":\"300s\"}}}" \
+    >/dev/null 2>&1 || warn "create call returned non-zero (it may already be provisioning)"
   for _ in $(seq 1 40); do
-    PGHOST="$(dbapi get "/api/2.0/database/instances/${DB_INSTANCE}" | pyjson 'd.get("read_write_dns","")')"
-    [ -n "$PGHOST" ] && break
-    sleep 15
+    PG_ENDPOINT="$(lb_endpoint)"
+    [ -n "$PG_ENDPOINT" ] && break
+    sleep 10
   done
 fi
-[ -n "$PGHOST" ] || die "Lakebase instance '$DB_INSTANCE' did not become ready. Lakebase (Database Instances) must be
+[ -n "$PG_ENDPOINT" ] || die "Lakebase project '$LAKEBASE_PROJECT' did not become ready. Lakebase Autoscaling must be
       available in this workspace/region. See docs/TROUBLESHOOTING.md, then re-run."
-ok "Lakebase host: $PGHOST"
+ok "Lakebase endpoint: $PG_ENDPOINT"
 
-# ---- Phase 3: render app.yaml + deploy bundle -----------------------------------------------
+# ---- Phase 5: render app.yaml + deploy bundle -----------------------------------------------
 step "Phase 5: deploy bundle (pipeline, jobs, app)"
 render_app_yaml() {  # $1 = genie space id (may be empty on first pass)
-  sed -e "s|__CATALOG__|${CATALOG}|g" -e "s|__SCHEMA__|${SCHEMA}|g" \
-      -e "s|__DB_INSTANCE__|${DB_INSTANCE}|g" -e "s|__PGHOST__|${PGHOST}|g" \
+  sed -e "s|__SCHEMA__|${SCHEMA}|g" -e "s|__PG_SCHEMA__|${PG_SCHEMA}|g" \
+      -e "s|__PG_ENDPOINT__|${PG_ENDPOINT}|g" \
       -e "s|__GENIE_SPACE__|${1:-}|g" "$ROOT/app/app.yaml.tmpl" > "$ROOT/app/app.yaml"
 }
 render_app_yaml ""
@@ -179,34 +200,30 @@ ok "bundle deployed"
 # Record which workspace this local state belongs to (used by the stale-state guard above).
 mkdir -p .databricks && printf '%s' "$WS_HOST" > "$STATE_MARKER" 2>/dev/null || true
 
-# grant the app's service principal read access on the catalog/schema
-APP_SP="$(dbapi get "/api/2.0/apps/${APP_NAME}" | pyjson 'd.get("service_principal_client_id","")')"
-if [ -n "$APP_SP" ]; then
-  run_sql "GRANT USE CATALOG ON CATALOG \`${CATALOG}\` TO \`${APP_SP}\`" || true
-  run_sql "GRANT USE SCHEMA ON SCHEMA \`${CATALOG}\`.\`${SCHEMA}\` TO \`${APP_SP}\`" || true
-  run_sql "GRANT SELECT ON SCHEMA \`${CATALOG}\`.\`${SCHEMA}\` TO \`${APP_SP}\`" || true
-  ok "granted app service principal SELECT on ${CATALOG}.${SCHEMA}"
-else
-  warn "could not resolve the app service principal yet; grants will be retried on the next deploy"
-fi
-
-# ---- Phase 4: data generation ---------------------------------------------------------------
+# ---- Phase 6: data generation ---------------------------------------------------------------
 if [ "$RUN_DATA" -eq 1 ]; then
   step "Phase 6: generating data (this is the longest step, ~10-20 min)"
   "$HERE/generate_data.sh" --profile "$PROFILE" --catalog "$CATALOG" --schema "$SCHEMA" \
-      --warehouse "$WAREHOUSE_ID" --db-instance "$DB_INSTANCE" --app-name "$APP_NAME"
+      --warehouse "$WAREHOUSE_ID" --lakebase "$LAKEBASE_PROJECT" --app-name "$APP_NAME"
   ok "data generated"
 else
   warn "Phase 6: skipping data generation (--skip-data)"
 fi
 
-# ---- Phase 5: medallion ---------------------------------------------------------------------
+# ---- Phase 7: medallion ---------------------------------------------------------------------
 step "Phase 7: medallion pipeline (bronze -> silver -> gold)"
 brun medallion --full-refresh-all
 ok "medallion complete"
 
-# ---- Phase 6: surfaces (Genie + dashboard) --------------------------------------------------
-step "Phase 8: Genie space + AI/BI dashboard"
+# ---- Phase 8: Lakebase sync, right after the medallion -----------------------------------------
+# One synced table per gold mart (one sync pipeline), synced now; seeds the recommendation write-back
+# table, grants the app, and creates the "Lakebase sync" job that re-runs the sync every 5 minutes.
+step "Phase 8: land the gold marts in Lakebase (synced tables) + schedule the re-sync"
+brun lakebase_sync || die "The Lakebase sync failed, so the app would have no data. See docs/TROUBLESHOOTING.md, then re-run."
+ok "gold marts synced to Lakebase (Postgres schema ${PG_SCHEMA}); re-sync scheduled"
+
+# ---- Phase 9: surfaces (Genie + dashboard, over gold in the lakehouse) -----------------------
+step "Phase 9: Genie space + AI/BI dashboard"
 if brun surfaces; then ok "surfaces built"; else warn "surfaces job hit an issue (Genie/dashboard). The app still works; see docs/TROUBLESHOOTING.md."; fi
 # A newly created Genie space can take a few seconds to appear in the spaces list, so poll for it.
 find_genie() { dbapi get /api/2.0/genie/spaces | python3 -c 'import sys,json
@@ -218,17 +235,13 @@ GENIE_ID=""
 for _ in $(seq 1 12); do GENIE_ID="$(find_genie)"; [ -n "$GENIE_ID" ] && break; sleep 6; done
 [ -n "$GENIE_ID" ] && ok "Genie space: $GENIE_ID" || warn "Genie space id not found; the app's Genie lamp link will be hidden until a redeploy finds it."
 
-# ---- Phase 7: start the app, wired to Genie -------------------------------------------------
-step "Phase 9: start the app"
+# ---- Phase 10: start the app, wired to Genie + Lakebase -------------------------------------
+step "Phase 10: start the app"
 render_app_yaml "$GENIE_ID"
 bdeploy
 brun app
 
-# ---- Phase 8: Lakebase seed -----------------------------------------------------------------
-step "Phase 10: seed Lakebase (recommendation write-back table + grants)"
-if brun lakebase_seed; then ok "Lakebase seeded"; else warn "Lakebase seed hit an issue; recommendation write-back may be read-only. See docs/TROUBLESHOOTING.md."; fi
-
-# ---- Phase 9: summary -----------------------------------------------------------------------
+# ---- Summary -------------------------------------------------------------------------------
 APP_URL="$(dbapi get "/api/2.0/apps/${APP_NAME}" | pyjson 'd.get("url","")')"
 # WS_HOST was resolved in Phase 1.
 printf "\n%s============================================================%s\n" "$C_G" "$C_0"
@@ -238,5 +251,6 @@ printf "  App:        %s\n" "${APP_URL:-"(open Compute > Apps > ${APP_NAME})"}"
 printf "  Catalog:    %s.%s   (open Catalog to browse the marts)\n" "$CATALOG" "$SCHEMA"
 [ -n "$GENIE_ID" ] && [ -n "$WS_HOST" ] && printf "  Genie:      %s/one/agents/%s\n" "$WS_HOST" "$GENIE_ID"
 printf "  Dashboard:  open Dashboards > \"%s\"\n" "$DASH_NAME"
-printf "  Warehouse:  %s\n" "$WAREHOUSE_ID"
+printf "  Lakebase:   %s  (Postgres schema %s; re-sync job \"[%s.%s] Gas Twin - Lakebase sync\")\n" "$LAKEBASE_PROJECT" "$PG_SCHEMA" "$CATALOG" "$SCHEMA"
+printf "  Warehouse:  %s  (Genie + dashboard)\n" "$WAREHOUSE_ID"
 printf "\n  New here? Read docs/NAVIGATION.md for a guided tour of the app.\n\n"
