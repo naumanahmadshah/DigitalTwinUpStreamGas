@@ -78,7 +78,8 @@ function svgLine(rows, xk, series, opts) {
     const pts = rows.map((r, i) => ({ i, y: num(r[s.key]) })).filter(p => p.y === p.y);
     if (!pts.length) return "";
     const d = pts.map((p, k) => (k ? "L" : "M") + sx(p.i).toFixed(1) + " " + sy(p.y).toFixed(1)).join(" ");
-    return `<path d="${d}" class="line" style="stroke:${s.color}"${s.dash ? ' stroke-dasharray="5 4"' : ''}/>`;
+    const fo = opts && opts.focus, hit = fo && (fo.ids.has(s.key) || fo.ids.has(s.label)), anyHit = fo && series.some(q => fo.ids.has(q.key) || fo.ids.has(q.label));
+    return `<path d="${d}" class="line${hit ? " fhi" : (anyHit ? " fdim" : "")}" style="stroke:${s.color}"${s.dash ? ' stroke-dasharray="5 4"' : ''}/>`;
   }).join("");
   const legend = series.length > 1 ? `<div class="chart-legend">${series.map(s => `<span class="lg"><span class="lg-s" style="background:${s.color}"></span>${s.label || s.key}</span>`).join("")}</div>` : "";
   return `${legend}<svg viewBox="0 0 ${W} ${H}" class="chart">${grid}${zero}${xax}${paths}</svg>`;
@@ -113,14 +114,19 @@ function drawBar(host) {
   const mean = pts.reduce((a, p) => a + p.y, 0) / n, dev = opts.color === "lowbad";
   const fill = y => y < mean * 0.75 ? BARPAL.deep : y < mean * 0.93 ? BARPAL.teal : BARPAL.mint;
   const bwid = Math.max(1, Math.min(MAX_BAR, slot - 4));
+  const fo = opts.focus, FC = { red: "#dd4b1a", amber: "#e0a53a" };
   const bars = pts.map((p, i) => { const h = Math.max(1, (p.y / top) * plotH), x = pL + i * slot + (slot - bwid) / 2;
-    return `<rect x="${x.toFixed(1)}" y="${(baseY - h).toFixed(1)}" width="${bwid.toFixed(1)}" height="${h.toFixed(1)}" class="bar"${dev ? ` style="fill:${fill(p.y)}"` : ""}><title>${escAttr(p.x)}: ${fmt(p.y)}</title></rect>`; }).join("");
+    const f0 = dev ? fill(p.y) : "", hit = fo && fo.ids.has(p.x);
+    const st = hit ? ` style="fill:${FC[fo.level]};stroke:#7a2410;stroke-width:1"` : (f0 ? ` style="fill:${f0}"` : "");
+    return `<rect x="${x.toFixed(1)}" y="${(baseY - h).toFixed(1)}" width="${bwid.toFixed(1)}" height="${h.toFixed(1)}" class="bar${hit ? " fbar" : ""}" data-f0="${f0}"${st}><title>${escAttr(p.x)}: ${fmt(p.y)}</title></rect>`; }).join("");
   const ly = baseY + (rotate ? 14 : 17);
   const labels = pts.map((p, i) => { const cx = (pL + i * slot + slot / 2).toFixed(1);
     return rotate ? `<text x="${cx}" y="${ly}" class="axb" text-anchor="end" transform="rotate(-45 ${cx} ${ly})"><title>${escAttr(p.x)}</title>${short(p.x)}</text>`
                   : `<text x="${cx}" y="${ly}" class="axb" text-anchor="middle"><title>${escAttr(p.x)}</title>${short(p.x)}</text>`; }).join("");
   const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="barsvg">${grid.join("")}<line x1="${pL}" y1="${baseY}" x2="${W - pR}" y2="${baseY}" class="gl"/>${bars}${labels}</svg>`;
   host.innerHTML = wide ? `<div class="barscroll">${svg}</div>` : svg;
+  const fb = host.querySelector(".bar.fbar"), sc = host.querySelector(".barscroll");   // a long chart scrolls to the first highlighted bar
+  if (fb && sc) sc.scrollLeft = Math.max(0, +fb.getAttribute("x") - 60);
 }
 function drawBars(root) { (root || document).querySelectorAll(".barchart").forEach(drawBar); }
 new MutationObserver(() => drawBars()).observe(document.documentElement, { childList: true, subtree: true });
@@ -253,9 +259,13 @@ function tableHTML(cols, rows, opts) {
   const clickable = !!(opts.rowClick && entity);
   const tid = "t" + (++_tblSeq);
   const head = cols.map((c, i) => `<th class="sortable ${isNum(key(c)) ? "num" : ""}" data-ci="${i}" data-num="${isNum(key(c)) ? 1 : 0}">${lab(c)}${dsc(c) ? " " + infoI(dsc(c)) : ""}<span class="sarrow"></span></th>`).join("");
+  // a row whose status is amber or red (watch, at risk, high, not passed...) is tinted that colour
+  const ROWST = { red: "red", watch: "amber", amber: "amber", not_passed: "red", high: "red", due: "amber", at_risk: "red", investigate: "red", monitor: "amber", critical: "red", warning: "amber", major: "amber" };
+  const rowSt = r => { let st = ""; PILL.filter(k => keys.includes(k) && k !== "priority" && k !== "severity").forEach(k => { const c = ROWST[String(r[k])]; if (c === "red" || (c === "amber" && !st)) st = c; }); return st; };
   const body = rows.map(r => {
     const pid = primaryCol ? escAttr(r[primaryCol] ?? "") : "";
-    const tr = clickable && pid ? `<tr class="rowclick" data-entity="${entity}" data-id="${pid}">` : "<tr>";
+    const st = rowSt(r), sc = st ? ` row-${st}` : "";
+    const tr = clickable && pid ? `<tr class="rowclick${sc}" data-entity="${entity}" data-id="${pid}">` : (sc ? `<tr class="${sc.trim()}">` : "<tr>");
     return tr + cols.map(c => {
       const k = key(c), v = r[k];
       const assetCell = (entity === "workorder" && k === "asset_id" && v != null && v !== "") ? ` data-asset-id="${escAttr(v)}"` : "";
@@ -282,12 +292,13 @@ function sortByTh(th) {
   table.querySelectorAll("th .sarrow").forEach(s => s.textContent = "");
   const ar = th.querySelector(".sarrow"); if (ar) ar.textContent = dir === 1 ? " ▲" : " ▼";
 }
-function chartsHTML(charts) {
+function chartsHTML(charts, fx) {
   if (!charts || !charts.length) return "";
   return `<div class="grid">${charts.map((c, i) => {
     const series = (c.opts && c.opts.series) ? c.opts.series
       : [{ key: c.y, label: c.title }].concat((c.title.includes("nomination") || (c.rows[0] && c.rows[0].nominated_e3m3 !== undefined)) ? [{ key: "nominated_e3m3", label: "nominated" }] : []);
-    const body = c.type === "bar" ? svgBar(c.rows, c.x, c.y, c.opts) : svgLine(c.rows, c.x, series, c.opts);
+    const fo = fx ? { ...(c.opts || {}), focus: fx } : c.opts;
+    const body = c.type === "bar" ? svgBar(c.rows, c.x, c.y, fo) : svgLine(c.rows, c.x, series, fo);
     return `<div class="card"><div class="card-h">${prettyLabel(c.title)}</div>${body}</div>`;
   }).join("")}</div>`;
 }
@@ -447,6 +458,28 @@ async function openListDrawer(kind) {
 // Bold Command Centre: the field read as a left-to-right flow system; the binding constraint is the villain.
 function _kv(kpis) { const m = {}; (kpis || []).forEach(k => { m[k.label] = k.value; }); return m; }
 
+// What made a Command Centre element red or amber, carried to the screen it opens so that screen can colour
+// the same rows, bars, lines and tiles (set on click, used once by the next module render).
+let FOCUS = null, CC_FOCUS = {};
+const CTYPE_TAB = { "compression": "compression", "liquid loading": "reservoir_wells", "custody UAF": "custody" };
+const basinOfName = n => ((n || "").match(/([A-Za-z-]+) Basin\)\s*$/) || [])[1];
+function focusFrom(list, level, lead) {
+  const live = list.filter(c => Number(c.production_at_risk_e3m3d) > 0); if (live.length) list = live;   // only what actually puts gas at risk
+  const ids = new Set(), sites = new Map(), basins = new Set(), types = new Set();
+  let risk = 0;
+  list.forEach(c => { [c.asset_id, c.well_id].forEach(x => x && ids.add(x)); types.add(c.constraint_type);
+    risk += Number(c.production_at_risk_e3m3d) || 0;
+    const nm = (c.site_name || c.area_code || "").replace(/ \([^)]*\)\s*$/, ""); sites.set(nm, (sites.get(nm) || 0) + 1);
+    const b = basinOfName(c.site_name); if (b) { basins.add(b); ids.add(b === "Cooper-Eromanga" ? "Cooper" : b); ids.add(b); } });
+  const t = [...types][0] || "", n = list.length;
+  const what = t === "compression" ? `${n} compressor${n > 1 ? "s" : ""} in poor health` : t === "liquid loading" ? `${n} well${n > 1 ? "s" : ""} loading up with liquid`
+    : t === "custody UAF" ? `metered and allocated gas diverging at ${n} meter${n > 1 ? "s" : ""}` : `${n} constraint${n > 1 ? "s" : ""}`;
+  const where = [...sites.keys()].filter(Boolean).slice(0, 3).join(", ");
+  const KPI = { "compression": ["at risk", "health"], "liquid loading": ["liquid-loading"], "custody UAF": ["uaf"] }[t] || [];
+  return { key: CTYPE_TAB[t] || "processing", level, ids, kpis: KPI,
+           text: `${lead}: ${what}${where ? ` (${where})` : ""}, ${fmt(risk)} ×10³m³/d at risk. Highlighted below.` };
+}
+
 function ccSpine(cons, bindingTop) {
   const stopOf = { "compression": "Processing", "liquid loading": "Wells", "custody UAF": "Custody" };
   const stops = ["Reservoir", "Wells", "Gathering", "Processing", "Custody"];
@@ -460,9 +493,18 @@ function ccSpine(cons, bindingTop) {
     const isBind = s === binding;
     const isNext = !isBind && s === secondary;
     const state = isBind ? "bind" : (isNext ? "watch" : "ok");
-    const sub = isBind ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : (isNext ? "next" : "nominal");
-    return `<div class="cc2-stop ccgo ${state}" data-goto="${stopGoto[s]}">
-        <img class="cc2-stop-img" src="img/stop_${s.toLowerCase()}.png" alt="${s}">
+    // the binding stop (red) puts the most gas at risk; the runner-up (amber) is the one to watch, the stop most likely to bind next
+    const sub = isBind ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : (isNext ? "watch · " + fmt(risk[s] || 0) + " ×10³m³/d at risk" : "nominal");
+    const tip = isBind ? "The field's binding constraint: this stop puts the most production at risk right now."
+      : isNext ? "Second-highest production at risk: the stop most likely to become the constraint next." : "No significant production at risk at this stop.";
+    let goto = stopGoto[s], fattr = "";
+    if (isBind || isNext) {   // open the tab where the cause lives, with the cause highlighted there
+      const mine = (cons || []).filter(c => (stopOf[c.constraint_type] || "Processing") === s);
+      CC_FOCUS[s] = focusFrom(mine, isBind ? "red" : "amber", isBind ? `Why ${s} is red, the field's bottleneck` : `Why ${s} is amber, the stop to watch`);
+      goto = CC_FOCUS[s].key; fattr = ` data-focus="${s}"`;
+    }
+    return `<div class="cc2-stop ccgo ${state}" data-goto="${goto}"${fattr} title="${tip}">
+        <img class="cc2-stop-img" src="img/stop_${s.toLowerCase()}.png?v=3" alt="${s}">
         <span class="cc2-stop-name">${s}</span>
         <span class="cc2-stop-sub">${sub}</span>
       </div>${i < stops.length - 1 ? '<span class="cc2-pipe"></span>' : ""}`;
@@ -521,16 +563,16 @@ async function renderCommand() {
         <div class="cc2-rate-val">${fmt(rate)}</div>
         <div class="cc2-rate-lab">field rate · 10³m³/d ${infoI("Current total field gas production rate across all producing wells (10³m³/d).")}</div>
       </div>
-      <div class="cc2-gap ccgo ${down ? "down" : "up"}" data-goto="commercial">
+      <div class="cc2-gap ccgo ${down ? "down" : "up"}" data-goto="commercial"${down ? ' data-focus="gap"' : ""}>
         <div class="cc2-gap-lab">Difference from commitment ${infoI("Actual field production minus the contractual nomination. Shown red when the field is below commitment.")}</div>
         <div class="cc2-gap-val">${down ? "▼" : "▲"} ${fmt(Math.abs(gap))}</div>
       </div>
-      ${top ? `<div class="cc2-cx ccgo" data-goto="compression">
+      ${top ? `<div class="cc2-cx ccgo" data-goto="${CTYPE_TAB[top.constraint_type] || "compression"}" data-focus="bottleneck">
         <div class="cc2-cx-lab">The bottleneck ${infoI("The single asset putting the most production at risk right now, from the ranked field constraints.")}</div>
         <div class="cc2-cx-asset">${top.asset_id}</div>
         <div class="cc2-cx-meta">${top.constraint_type}, ${fmt(top.production_at_risk_e3m3d)} ×10³m³/d at risk</div>
       </div>` : "<div></div>"}
-      <a class="cc2-maplink" href="#" title="Open the Field Map" aria-label="Open the Field Map"><img src="img/fieldmap.png" alt=""><span>Field Map</span></a>
+      <a class="cc2-maplink" href="#" title="Open the Field Map" aria-label="Open the Field Map"><img src="img/fieldmap.png?v=2" alt=""><span>Field Map</span></a>
       <a class="cc2-maplink cc2-impactlink" href="#" title="Trace what each stop feeds, down to the customers" aria-label="Impact analysis">${IMPACT_ICON}<span>Impact analysis</span></a>
     </div>
 
@@ -543,6 +585,12 @@ async function renderCommand() {
 
     <div class="cc2-ledger">${led.map(x => `<div class="cc2-led ccgo" data-goto="${x[4]}"><div class="cc2-led-v">${x[1]}</div><div class="cc2-led-n">${x[0]} ${infoI(x[3])}</div><div class="cc2-led-s">${x[2]}</div></div>`).join("")}</div>
   </div>`;
+  if (top) CC_FOCUS.bottleneck = focusFrom([top], "red", "The bottleneck");
+  if (down) {   // the shortfall days behind the red difference from commitment
+    const short = series.slice(-62).filter(r => Number(r.actual_e3m3) < Number(r.nominated_e3m3));
+    CC_FOCUS.gap = { key: "commercial", level: "red", kpis: ["delivery vs nomination"], ids: new Set(short.map(r => String(r.gas_day).slice(0, 10))),
+      text: `Why the field is red against commitment: ${fmt(Math.abs(gap))} ×10³m³/d below nomination on the latest gas day, and below nomination on ${short.length} of the last 62 gas days. Those days are highlighted below.` };
+  }
   v.querySelector(".cc2-maplink").onclick = e => { e.preventDefault(); e.stopPropagation(); select("map"); };
   v.querySelector(".cc2-impactlink").onclick = e => { e.preventDefault(); e.stopPropagation(); select("impact"); };
   const rows = series.slice(-62), box = v.querySelector(".cc2-chartbox");
@@ -562,13 +610,29 @@ async function renderModuleInto(sel, key) {
   const hint = key === "workorders"
     ? "Click a work order for its detail; click an asset id to open the asset."
     : "Click a row to see its details.";
+  const fx = FOCUS && FOCUS.key === key ? FOCUS : null; FOCUS = null;   // a cause carried from the Command Centre
   v.innerHTML = `
+    ${fx ? `<div class="focus-banner ${fx.level}"><span class="fb-dot"></span><span class="fb-t">${fx.text}</span><button class="fb-x" title="Clear the highlight" aria-label="Clear the highlight">✕</button></div>` : ""}
     ${d.period ? `<div class="muted periodline">Period: ${d.period}</div>` : ""}
     ${kpiRow(d.kpis)}
-    ${chartsHTML(d.charts)}
+    ${chartsHTML(d.charts, fx)}
     ${d.map ? '<div class="card"><div class="card-h">Field map (assets by state)</div><div id="mapbox" class="leafmap"></div></div>' : ""}
     ${tbls.length ? `${anyClick ? `<div class="muted rowhint">${hint}</div>` : ""}<div class="tablegrid">${tbls.map(t => `<div class="card"><div class="card-h">${t.title || "Detail"}</div>${tableHTML(t.columns, t.rows, { rowClick: true })}</div>`).join("")}</div>` : ""}`;
   if (d.map) renderMapInto("#mapbox");
+  if (fx) applyFocus(v, fx);
+}
+
+// Colour what caused the red / amber: matching table rows (moved to the top of their table), KPI tiles and,
+// through chartsHTML, bars and line series. The banner's ✕ clears it all.
+function applyFocus(v, fx) {
+  const cls = "focus-" + fx.level;
+  v.querySelectorAll(".kpi").forEach(k => { const l = (k.querySelector(".kpi-l") || k).textContent.toLowerCase(); if ((fx.kpis || []).some(x => l.includes(x))) k.classList.add(cls); });
+  v.querySelectorAll("table.dtbl tbody").forEach(tb => {
+    const hit = Array.from(tb.rows).filter(tr => Array.from(tr.cells).some(td => fx.ids.has(td.getAttribute("data-v")) || fx.ids.has((td.getAttribute("data-v") || "").slice(0, 10))));
+    hit.reverse().forEach(tr => { tr.classList.add(cls); tb.prepend(tr); });
+  });
+  const x = v.querySelector(".fb-x");
+  if (x) x.onclick = () => { v.querySelectorAll(".focus-red,.focus-amber").forEach(e => e.classList.remove("focus-red", "focus-amber")); v.querySelectorAll(".bar.fbar").forEach(b => { b.classList.remove("fbar"); b.style.fill = b.getAttribute("data-f0") || ""; }); v.querySelectorAll(".line.fdim,.line.fhi").forEach(l => l.classList.remove("fdim", "fhi")); x.parentElement.remove(); };
 }
 
 // Item 9: left-nav "Gas flow chain" opens the five value-chain stops as horizontal tabs on top.
@@ -679,11 +743,17 @@ async function renderNavigator() {
   let scenes; try { scenes = await getJSON("/api/scenes"); } catch (e) { v.innerHTML = `<div class="placeholder">Navigator unavailable. ${e}</div>`; return; }
   v.innerHTML = `<div class="nav3">
       <div class="n3-left">
-        <div class="scene-head"><span>Value chain stop</span><span>Assets</span></div>
-        <div id="scenelist">${scenes.map(s => `<div class="scene-item" data-scene="${s.scene_id}"><span>${sceneLabel(s.scene_id)}</span><span>${s.red ? '<span class="dot red"></span>' : s.amber ? '<span class="dot amber"></span>' : '<span class="dot green"></span>'} ${s.assets}</span></div>`).join("")}</div></div>
-      <div class="n3-stage"><div id="canvas"></div></div>
+        <div id="scenelist">${sceneListHTML(scenes)}</div></div>
+      <div class="n3-stage"><div id="canvas"></div><button class="n3-close" title="Back to the normal layout" aria-label="Back to the normal layout">✕</button></div>
       <div class="n3-right" id="detail"></div>
     </div>`;
+  // the site view goes full screen: the menu slides away and the site list takes its place; ✕ brings the layout back
+  setImmersive(true);
+  v.querySelector(".n3-close").onclick = () => setImmersive(false);
+  v.querySelectorAll(".scene-sec .scene-grp").forEach(h => h.onclick = () => {   // collapse / expand a group
+    const sec = h.parentElement, k = sec.getAttribute("data-grp"), shut = !sec.classList.contains("closed");
+    sec.classList.toggle("closed", shut); h.setAttribute("aria-expanded", String(!shut)); if (shut) SCENE_CLOSED.add(k); else SCENE_CLOSED.delete(k);
+  });
   v.querySelectorAll("[data-scene]").forEach(b => b.onclick = () => { v.querySelectorAll(".scene-item").forEach(x => x.classList.remove("active")); b.classList.add("active"); loadScene(b.getAttribute("data-scene")); });
   if (scenes.length) {
     // PENDING_SCENE may be a scene id or a site's area code (from the Field Map); match either
@@ -692,10 +762,29 @@ async function renderNavigator() {
     PENDING_SCENE = null;
     const btn = Array.from(v.querySelectorAll(".scene-item")).find(x => x.getAttribute("data-scene") === want) || v.querySelector(".scene-item");
     btn.classList.add("active"); loadScene(want);
+    // open the site's group if it is folded and bring the site into view in the list
+    const sec = btn.closest(".scene-sec");
+    if (sec && sec.classList.contains("closed")) { sec.classList.remove("closed"); sec.querySelector(".scene-grp").setAttribute("aria-expanded", "true"); SCENE_CLOSED.delete(sec.getAttribute("data-grp")); }
+    btn.scrollIntoView({ block: "center" });
   }
 }
-function sceneLabel(s) { return s.replace("scene_", "").replace("_wh", " wellhead").replace("CPF001", "CPF Train 1").replace("CPF002", "CPF Train 2").replace("GTH001", "Gathering").replace("MET", "Custody metering"); }
+// The site list, grouped along the gas path (well pads, offshore platforms, gathering hubs, offshore manifolds,
+// gas plants, custody), each site named with its place underneath, e.g. "Well pad BAR029" over "Surat Basin".
+const SCENE_CLOSED = new Set();   // site-list groups the user has collapsed (kept while moving between sites)
+function sceneListHTML(scenes) {
+  const groups = [];
+  scenes.forEach(s => { const k = s.kind || "Sites"; let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, items: [] }); g.items.push(s); });
+  return groups.map(g => `<div class="scene-sec${SCENE_CLOSED.has(g.k) ? " closed" : ""}" data-grp="${escAttr(g.k)}">
+      <button class="scene-grp" type="button" aria-expanded="${!SCENE_CLOSED.has(g.k)}"><span>${g.k}</span><span class="sg-n">${g.items.length}</span><i class="sg-ar"></i></button>
+      <div class="scene-items">${g.items.map(s => {
+        const nm = (s.name || sceneLabel(s.scene_id)).replace(/^Sales gas metering, /, ""), m = nm.match(/^(.*?)\s*\(([^)]*)\)\s*$/);
+        return `<div class="scene-item" data-scene="${s.scene_id}"><span class="sc-nm">${m ? m[1] : nm}${m ? `<span class="sc-pl">${m[2]}</span>` : ""}</span></div>`;
+      }).join("")}</div></div>`).join("");
+}
+function sceneLabel(s) { return s.replace("scene_", "").replace("_wh", ""); }
 async function loadScene(sceneId) {
+  if (window.Twin3D && window.Twin3D.clear) window.Twin3D.clear();   // the old site (and the engineer) leave at once
+  closeAssetPanel();
   const assets = await getJSON("/api/scene/" + encodeURIComponent(sceneId));
   const canvas = $("#canvas");
   closeAssetPanel();   // the detail panel only slides in once an asset or tag is clicked
@@ -727,7 +816,7 @@ const IMPACT_ICON = `<svg viewBox="0 0 80 64" aria-hidden="true">
   <path d="M44 19 C57 19 56 12 69 12" stroke="#6a5cf0" stroke-opacity=".35" stroke-width="10" fill="none"/>
   <path d="M44 31 C57 31 56 31 69 31" stroke="#2e9c6a" stroke-opacity=".35" stroke-width="12" fill="none"/>
   <path d="M44 45 C57 45 56 51 69 51" stroke="#dd4b1a" stroke-opacity=".35" stroke-width="16" fill="none"/></svg>`;
-const IMP_COLS = [["reservoir", "Reservoir"], ["wells", "Well pads"], ["gathering", "Gathering"], ["processing", "Processing"],
+const IMP_COLS = [["reservoir", "Reservoir"], ["wells", "Pads & platforms"], ["gathering", "Gathering"], ["processing", "Processing"],
                   ["compression", "Compression"], ["custody", "Custody"], ["customer", "Customers"]];
 const IMP_STOP_COL = { reservoir: "#0c5a66", wells: "#2f7dc4", gathering: "#2e9c6a", processing: "#c98a1e", compression: "#6a5cf0", custody: "#3d5566" };
 const IMP_SEG_COL = { "LNG export": "#0c5a66", "LNG portfolio": "#3a8a96", "Retail": "#2f7dc4", "Distribution": "#6aa0d8", "Power generation": "#c98a1e",
@@ -774,8 +863,10 @@ function drawSankey(host) {
   const links = g.links.map(l => ({ ...l, f: Number(l.flow_e3m3d) || 0, s: byId[l.from_id], t: byId[l.to_id] })).filter(l => l.s && l.t && l.f > 0);
   links.forEach(l => { l.s.outs.push(l); l.t.ins.push(l); });
   const gapOf = c => Math.min(6, (H - top - bot) * 0.22 / Math.max(1, c.length - 1));
-  const k = Math.min(...cols.map(c => (H - top - bot - gapOf(c) * (c.length - 1)) / Math.max(1, c.reduce((a, n) => a + n.tp, 0))));
-  cols.forEach((c, ci) => c.forEach(n => { n.x = left + ci * colGap; n.h = Math.max(1.5, n.tp * k); n.col = ci; }));
+  // scale so every column fits, leaving room for the minimum bar height of its many small stops (pads)
+  const MINH = 1;
+  const k = Math.min(...cols.map(c => (H - top - bot - gapOf(c) * (c.length - 1) - MINH * c.length) / Math.max(1, c.reduce((a, n) => a + n.tp, 0))));
+  cols.forEach((c, ci) => c.forEach(n => { n.x = left + ci * colGap; n.h = Math.max(MINH, n.tp * k); n.col = ci; }));
   const place = c => { const gap = gapOf(c), tot = c.reduce((a, n) => a + n.h, 0) + gap * (c.length - 1); let y = top + Math.max(0, (H - top - bot - tot) / 2); c.forEach(n => { n.y = y; y += n.h + gap; }); };
   // order: reservoirs by size, then each column by the flow-weighted centre of what feeds it (fewer crossings)
   cols[0].sort((a, b) => b.tp - a.tp); place(cols[0]);
@@ -799,17 +890,25 @@ function drawSankey(host) {
   const unitTj = n => `${fmt(n.tp)} 10³ m³/d (${fmt(n.tp * 0.038)} TJ/d)`;
   const linkSvg = links.map(l => { const x0 = l.s.x + nodeW, x1 = l.t.x, xm = (x0 + x1) / 2;
     return `<path class="imp-link" data-k="${esc(l.from_id)}>${esc(l.to_id)}" d="M${x0.toFixed(1)},${l.sy.toFixed(1)} C${xm.toFixed(1)},${l.sy.toFixed(1)} ${xm.toFixed(1)},${l.ty.toFixed(1)} ${x1.toFixed(1)},${l.ty.toFixed(1)}" stroke="${colOf(l.s)}" stroke-width="${l.w.toFixed(2)}"><title>${esc(l.s.node_name)} → ${esc(l.t.node_name)}: ${fmt(l.f)} 10³ m³/d</title></path>`; }).join("");
+  // every customer is named: labels sit at their bar's centre, nudged apart where small bars bunch up,
+  // with a thin leader line back to the bar when a label had to move
+  const cust = cols[6].slice().sort((a, b) => a.y - b.y), LH = 13;
+  cust.forEach(n => { n.ly = n.y + n.h / 2 + 3.5; });
+  for (let i = 1; i < cust.length; i++) cust[i].ly = Math.max(cust[i].ly, cust[i - 1].ly + LH);
+  for (let i = cust.length - 1, lim = H - bot; i >= 0; i--) { cust[i].ly = Math.min(cust[i].ly, lim); lim = cust[i].ly - LH; }
   const nodeSvg = Object.values(byId).map(n => {
-    const lab = n.h >= 9 || n.col >= 5 || n.col === 0 || n.col === 3;
+    const lab = n.h >= 9 || (n.col === 5 && n.h >= 4) || n.col === 0 || n.col === 3 || n.col === 6;   // small customers: name in the tooltip
     // short labels so every column reads cleanly; the full name is in the tooltip
     const name = n.stop === "wells" || n.stop === "gathering" ? n.node_id
       : n.stop === "compression" ? n.node_id.replace(/^(CPF\d+)-CMP-CP-/, "$1 · ")
-      : n.stop === "custody" ? `${n.node_id} · ${n.node_name.replace(/^Sales gas metering, /, "").replace(/ \([^)]*Basin\)$/, "")}`
-      : n.node_name.replace(/ \([^)]*Basin\)$/, "");
+      : n.stop === "custody" ? ((n.node_name.match(/\(([^,)]*)/) || [, n.node_id])[1])   // the place; the meter code is in the tooltip
+      : n.node_name.replace(/ \([^)]*Basin\)$/, "").replace(/ (CPF|GTH|MNF)\d+$/, "");
     const st = n.stop === "wells" ? "" : n.status === "red" ? ' data-st="red"' : n.status === "amber" ? ' data-st="amber"' : "";
     return `<g class="imp-node" data-id="${esc(n.node_id)}"${st}><rect x="${n.x}" y="${n.y.toFixed(1)}" width="${nodeW}" height="${n.h.toFixed(1)}" rx="2" fill="${colOf(n)}"/>
       <rect class="imp-hit" x="${n.x - 3}" y="${(n.y - 1).toFixed(1)}" width="${nodeW + 6}" height="${(n.h + 2).toFixed(1)}"/>
-      ${lab ? `<text x="${n.x + nodeW + 5}" y="${(n.y + n.h / 2 + 3.5).toFixed(1)}" class="imp-lab${n.col >= 5 ? " big" : ""}">${esc(name)}</text>` : ""}
+      ${lab ? (n.col === 6
+        ? `${Math.abs(n.ly - (n.y + n.h / 2 + 3.5)) > 2 ? `<path class="imp-lead" d="M${n.x + nodeW + 1},${(n.y + n.h / 2).toFixed(1)} L${n.x + nodeW + 9},${(n.ly - 3.5).toFixed(1)}"/>` : ""}<text x="${n.x + nodeW + 11}" y="${n.ly.toFixed(1)}" class="imp-lab big">${esc(name)}</text>`
+        : `<text x="${n.x + nodeW + 5}" y="${(n.y + n.h / 2 + 3.5).toFixed(1)}" class="imp-lab${n.col >= 5 ? " big" : ""}">${esc(name)}</text>`) : ""}
       <title>${esc(n.node_name)}\n${unitTj(n)}${n.status && n.status !== "green" ? `\nHealth: ${n.status}` : ""}\nClick to trace</title></g>`; }).join("");
   const heads = IMP_COLS.map((c, i) => `<text class="imp-colh" x="${left + i * colGap}" y="16">${c[1]}</text>`).join("");
   host.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" class="imp-svg"><rect class="imp-bg" x="0" y="0" width="${W}" height="${H}"/>${heads}<g class="imp-links">${linkSvg}</g>${nodeSvg}</svg>`;
@@ -866,43 +965,6 @@ function renderMapScreen() {
   renderMapInto("#mapbox");
 }
 
-// Assets map: every asset across the field on the Australia map, a typed icon per asset; click an
-// asset to open its detail drawer and jump into the 3D visualization.
-const FAC_CAT = {
-  wellhead: ["Well", "#2f7dc4", "W"],
-  gathering_line: ["Gathering", "#2e9c6a", "G"], gathering_segment: ["Gathering", "#2e9c6a", "G"],
-  compressor: ["Compression", "#e0533a", "C"],
-  metering: ["Custody", "#6a5cf0", "M"], custody_meter: ["Custody", "#6a5cf0", "M"],
-};
-function facCat(t) { return FAC_CAT[t] || ["Processing", "#c98a1e", "P"]; }
-async function renderFacilityView() {
-  const v = $("#view");
-  const cats = [["Well", "#2f7dc4", "W"], ["Gathering", "#2e9c6a", "G"], ["Processing", "#c98a1e", "P"], ["Compression", "#e0533a", "C"], ["Custody", "#6a5cf0", "M"]];
-  v.innerHTML = `<div class="faclegend">${cats.map(c => `<span class="fl-item"><span class="fl-ic" style="background:${c[1]}">${c[2]}</span>${c[0]}</span>`).join("")}</div>
-    <div id="facmap" class="leafmap"></div>`;
-  const host = $("#facmap"); if (!host || typeof L === "undefined") { if (host) host.innerHTML = '<div class="muted" style="padding:16px">map unavailable</div>'; return; }
-  if (_leaf) { try { _leaf.remove(); } catch (e) {} _leaf = null; }
-  fitMapHeight(host);
-  const map = L.map(host, { minZoom: 3, maxZoom: 16, zoomControl: true });
-  map.setView([-26.5, 132.6], 5); _leaf = map;   // same opening view as the Field Map
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { subdomains: "abc", maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
-  let facs; try { facs = await getJSON("/api/assets_bbox"); } catch (e) { return; }
-  // a group of assets shows its count as a pill
-  const clusterIcon = c => L.divIcon({ className: "faccluster", html: `<span class="facmag"><b>${c.getChildCount()} assets</b></span>`, iconSize: [86, 30], iconAnchor: [43, 15] });
-  const layer = (window.L.markerClusterGroup ? L.markerClusterGroup({ maxClusterRadius: 44, iconCreateFunction: clusterIcon }) : L.layerGroup());
-  const SKIP = new Set(["esp", "gas_lift"]);   // artificial-lift kit is co-located with its wellhead; show one marker per well
-  facs.forEach(f => {
-    if (f.lat == null || f.lon == null || SKIP.has(f.equipment_type)) return;
-    const [cat, col, letter] = facCat(f.equipment_type);
-    const ic = L.divIcon({ className: "facdiv", html: `<span class="facpin" style="background:${col}">${letter}</span>`, iconSize: [22, 22], iconAnchor: [11, 11] });
-    const mk = L.marker([f.lat, f.lon], { icon: ic });
-    mk.bindTooltip(`${f.asset_id} · ${cat}`);
-    mk.on("click", () => openAssetDrawer(f.asset_id, f.scene_id));
-    layer.addLayer(mk);
-  });
-  map.addLayer(layer);
-  setTimeout(() => map.invalidateSize(), 200);
-}
 // Size a map to the space left below its header/legend so the page never scrolls.
 function fitMapHeight(host) {
   const fit = () => { if (!host.isConnected) { window.removeEventListener("resize", fit); return; }
@@ -1043,7 +1105,7 @@ async function renderAssetExplorer() {
       </div>
       <div class="card explorer-col">
         <div class="card-h">Browse by physical location</div>
-        <div class="blurb" style="margin-bottom:10px">The functional-location hierarchy: field → area → asset → tag. Click an asset to open its 360; click a tag to resolve it on the left.</div>
+        <div class="blurb" style="margin-bottom:10px">The functional-location hierarchy: field → basin → site → asset → tag. Click an asset to open its 360; click a tag to resolve it on the left.</div>
         <div id="loc_tree"><div class="muted">Loading locations…</div></div>
       </div>
     </div>`;
@@ -1071,11 +1133,24 @@ async function wireLocationTree(run) {
   const host = $("#loc_tree");
   let d; try { d = await getJSON("/api/tree"); } catch (e) { host.innerHTML = '<div class="muted">location tree unavailable</div>'; return; }
   const areas = d.areas || [];
-  host.innerHTML = areas.map(a =>
-    `<div class="tnode" data-area="${escAttr(a.area_code)}">
-      <div class="trow area"><span class="tcaret">▸</span><span class="tlabel">${a.name || a.area_code}</span><span class="tmeta">${a.n_assets} assets · ${a.n_tags} tags</span></div>
-      <div class="tkids" style="display:none"></div>
-    </div>`).join("") || '<div class="muted">No locations.</div>';
+  // the location level: every site sits in its basin (named in the site name, e.g. "(Karratha, Carnarvon Basin)");
+  // basins with the most sites first, and within a basin the sites along the gas path (pads, platforms, hubs,
+  // manifolds, plants, custody)
+  const KIND = ["BAR", "PLT", "GTH", "MNF", "CPF", "MET"], basinOf = a => ((a.name || "").match(/([^,(]+) Basin\)\s*$/) || [, "Other"])[1].trim();
+  const groups = {};
+  areas.forEach(a => (groups[basinOf(a)] = groups[basinOf(a)] || []).push(a));
+  const order = Object.keys(groups).sort((x, y) => groups[y].length - groups[x].length || x.localeCompare(y));
+  const sum = (l, k) => l.reduce((t, a) => t + (Number(a[k]) || 0), 0);
+  host.innerHTML = order.map(b => {
+    const sites = groups[b].slice().sort((x, y) => KIND.indexOf(x.area_code.slice(0, 3)) - KIND.indexOf(y.area_code.slice(0, 3)) || x.area_code.localeCompare(y.area_code));
+    return `<div class="tnode basin" data-basin="${escAttr(b)}">
+      <div class="trow basin"><span class="tcaret">▸</span><span class="tlabel">${b} Basin</span><span class="tmeta">${sites.length} sites · ${fmt(sum(sites, "n_assets"))} assets · ${fmt(sum(sites, "n_tags"))} tags</span></div>
+      <div class="tkids" style="display:none" data-loaded="1">${sites.map(a =>
+        `<div class="tnode" data-area="${escAttr(a.area_code)}">
+          <div class="trow area"><span class="tcaret">▸</span><span class="tlabel">${(a.name || a.area_code).replace(/^Sales gas metering, /, "").replace(/ \(([^)]*)\)\s*$/, (m, p) => p.includes(",") ? ` (${p.split(",")[0].trim()})` : "")}</span><span class="tmeta">${a.n_assets} ${a.n_assets == 1 ? "asset" : "assets"} · ${a.n_tags} tags</span></div>
+          <div class="tkids" style="display:none"></div>
+        </div>`).join("")}</div>
+    </div>`; }).join("") || '<div class="muted">No locations.</div>';
   host.addEventListener("click", async (e) => {
     const open360 = e.target.closest(".topen[data-asset-id]");
     if (open360) { e.preventDefault(); e.stopPropagation(); openAssetDrawer(open360.getAttribute("data-asset-id")); return; }
@@ -1102,15 +1177,19 @@ async function wireLocationTree(run) {
 }
 
 /* ---------- nav + routing ---------- */
+// Each menu item carries its hand-drawn icon (img/nav/<key>.png, made with Meshy in the blue-flame colours).
+const NAV_ICONS = new Set(["command_centre", "gas_flow_chain", "cross_landscape", "recommendations", "asset_model"]);
+const navBtn = (key, label) => `<button class="nav-item${NAV_ICONS.has(key) ? " has-ic" : ""}" data-key="${key}" aria-label="${label}">` +
+  (NAV_ICONS.has(key) ? `<img class="nav-ic" src="img/nav/${key}.png?v=2" alt="" aria-hidden="true">` : "") + `<span>${label}</span></button>`;
 function buildNav() {
   const groups = {};
   NAV.forEach(n => { (groups[n.group] = groups[n.group] || []).push(n); });
   // Item 49: a flat menu, no group headings. Value-chain stops collapse into one "Gas flow chain"
   // entry (item 9) and the cross-cutting reports into one "Analytics" entry (item 28).
   $("#nav").innerHTML = Object.entries(groups).map(([g, items]) => {
-    if (g === "Value chain") return `<button class="nav-item" data-key="gas_flow_chain"><span>Gas flow chain</span></button>`;
-    if (g === "Cross-cutting") return `<button class="nav-item" data-key="cross_landscape"><span>Analytics</span></button>`;
-    return items.map(n => `<button class="nav-item" data-key="${n.key}"><span>${n.label}</span></button>`).join("");
+    if (g === "Value chain") return navBtn("gas_flow_chain", "Gas flow chain");
+    if (g === "Cross-cutting") return navBtn("cross_landscape", "Analytics");
+    return items.map(n => navBtn(n.key, n.label)).join("");
   }).join("");
   $("#nav").querySelectorAll("[data-key]").forEach(b => b.onclick = () => select(b.getAttribute("data-key")));
   $("#nav").addEventListener("scroll", placeTail);
@@ -1123,8 +1202,14 @@ async function setHeadLinks() {
   const gu = await genieUrl();
   host.innerHTML = gu ? `<a class="hl genie-link" href="${gu}" target="_blank" rel="noopener" title="Ask Genie" aria-label="Ask Genie"><img src="img/genie.png" alt="Ask Genie"></a>` : "";
 }
+// Full-screen site view: hides the left menu (with a slide) so the 3D landscape gets the whole screen.
+function setImmersive(on) {
+  document.body.classList.toggle("immersive", !!on);
+  if (!on) setTimeout(placeTail, 320);   // once the menu has slid back in
+}
 function select(key) {
   CUR = key;
+  if (key !== "navigator") setImmersive(false);
   // Screens outside the menu (Field Map, 3D site view) keep the item you came from highlighted,
   // so the content bubble always has a menu item to point at.
   const items = [...$("#nav").querySelectorAll(".nav-item")];
@@ -1149,7 +1234,6 @@ function route(key) {
   if (key === "impact") return renderImpact();
   if (key === "gas_flow_chain") return renderGasFlowChain();
   if (key === "cross_landscape") return renderCrossLandscape();
-  if (key === "facility_view") return renderFacilityView();
   if (key === "weather") return renderWeather();
   if (key === "navigator") return renderNavigator();
   if (key === "recommendations") return renderRecommendations();
@@ -1166,7 +1250,7 @@ async function boot() {
       openWoDrawer(wo.getAttribute("data-wo-id"), row.getAttribute("data-back"), in3d); return; }
     const ac = e.target.closest("td[data-asset-id]"); if (ac) { openAssetDrawer(ac.getAttribute("data-asset-id")); return; }  // asset-id cell wins (item 29)
     const kl = e.target.closest(".kpi[data-list]"); if (kl) { openListDrawer(kl.getAttribute("data-list")); return; }       // tile opens a full list
-    const g = e.target.closest("[data-goto]"); if (g) { goTo(g.getAttribute("data-goto")); return; }
+    const g = e.target.closest("[data-goto]"); if (g) { const fk = g.getAttribute("data-focus"); FOCUS = fk && CC_FOCUS[fk] ? CC_FOCUS[fk] : null; goTo(g.getAttribute("data-goto")); return; }
     const row = e.target.closest("tr.rowclick"); if (row) { const ent = row.getAttribute("data-entity"), id = row.getAttribute("data-id"); if (ent === "workorder") openWoDrawer(id); else openAssetDrawer(id); return; }  // context-sensitive
     const k = e.target.closest(".kpi[data-link]"); if (k) { goTo(k.getAttribute("data-link")); return; }
   });

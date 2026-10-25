@@ -38,7 +38,7 @@ def run_backfill(spark, cfg, catalog, schema):
     seed = int(cfg["seed"])
     start, end = simclock.timeline(cfg)
     bb = asset_model.build_semantic_backbone(cfg)
-    idx = core.index_backbone(bb)
+    idx = core.index_backbone(bb, cfg)
     scen = core.Scenarios(cfg, start, end)
     dq = core.DataQuality(cfg, seed)
 
@@ -84,7 +84,7 @@ def run_realtime(spark, cfg, catalog, schema, max_minutes):
     seed = int(cfg["seed"])
     start, end = simclock.timeline(cfg)
     bb = asset_model.build_semantic_backbone(cfg)
-    idx = core.index_backbone(bb)
+    idx = core.index_backbone(bb, cfg)
     scen = core.Scenarios(cfg, start, end)
     dq = core.DataQuality(cfg, seed)
     records.ensure_landing_tables(spark, catalog, schema)

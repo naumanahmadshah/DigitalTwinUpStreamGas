@@ -54,6 +54,36 @@ location, live value and its ids in every other system (PI historian, EAM, OSDU,
   The sync runs right after each medallion load (in the deploy) and then every 5 minutes.
   A mart whose gold has not changed is skipped, so an idle sync run is short.
 
+### The field
+
+A national Australian operator, onshore and offshore, in realistic proportions (all names are fictional):
+
+- **Onshore:**\
+  Queensland coal seam gas in the Surat and Bowen basins (90 well pads, 2 to 6 wells each, ESP
+  dewatered), conventional gas in the Cooper-Eromanga (South Australia and Queensland), Perth (WA) and
+  Amadeus (NT) basins. 118 well pads tied into 17 gathering hubs.
+- **Offshore:**\
+  17 wellhead platforms at the real field areas of the Carnarvon (North West Shelf), Browse,
+  Bonaparte, Gippsland (Bass Strait) and Otway basins, tied into 6 offshore manifolds and trunklines
+  to shore.
+- **Gas plants and custody:**\
+  13 gas plants at their real towns (Miles, Chinchilla, Tara, Injune, Moomba, Karratha, Barrow
+  Island, Darwin, Wadeye, Longford, Port Campbell, Dongara, Mereenie), each in the basin whose gas it
+  handles and carrying the units its gas needs (CSG plants only dehydrate; conventional and offshore
+  plants also remove CO2 and recover NGL). 12 custody points at the real export and delivery points
+  supply 31 customers (LNG buyers, retailers, power, industry and spot markets).
+- **Proportions:**\
+  183 sites and 479 wells. The CSG pads are most of the sites, as in reality, while a handful of
+  offshore platforms carry most of the gas: about half from the Carnarvon basin, a quarter from
+  Queensland CSG, a tenth from Browse and the rest from Bass Strait, Otway, Bonaparte, Perth, Cooper
+  and Amadeus. Each well's rate, depth and gas composition (CO2, H2S) follow its basin.
+- **Site health:**\
+  About two thirds of the sites are healthy (green), a fifth need attention (amber) and about one in
+  ten is critical (red). Work orders, trips and equipment wear follow each site's condition.
+
+The layout lives in config/twin_config.yaml (basins, platforms, plants, custody points, customers and
+the site-condition odds).
+
 ### What gets deployed
 
 | Component | What it is |
@@ -61,7 +91,7 @@ location, live value and its ids in every other system (PI historian, EAM, OSDU,
 | **Catalog + schema** | A Unity Catalog catalog (default gas_upstream_digital_twin) and schema (digital_twin) holding every table, mart and the landing volume. |
 | **Data generator** | A serverless job that builds the semantic backbone and backfills telemetry, events, work orders, lab assays, weather, prices, spares and more. |
 | **Medallion pipeline** | A serverless Lakeflow (DLT) pipeline: bronze (raw) to silver (conformed) to gold (curated marts). |
-| **The app** | "Databricks Asset Atlas": a FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, Assets map, site views, the Gas flow chain and Analytics tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
+| **The app** | "Databricks Asset Atlas": a FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, site views, the Gas flow chain and Analytics tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
 | **Genie space** | "Asset Intelligence Genie": a curated natural-language analytics space over the gold marts only, opened in Databricks One from the app's lamp icon. |
 | **AI/BI dashboard** | A published dashboard, "Gas Upstream Digital Twin", with five pages: Field Command Centre, Wells & Lift, Compression Health, Deferment & Emissions, Custody & UAF. |
 | **Lakebase** | A Lakebase Autoscaling project (0.5 to 4 CU, scales to zero after 5 idle minutes): the app's **only** database. Every gold mart the app reads is a Lakebase synced table (one sync pipeline), refreshed straight after the medallion and then every 5 minutes by the "Lakebase sync" job; recommendation decisions are written back to it. |
@@ -75,11 +105,11 @@ carry COMMENTs.
 
 - **Generation (the setup job):**\
   write_backbone writes the semantic backbone (tag registry, asset
-  master, functional-location hierarchy, well master, PVT, id crossmap: 923 assets, 5,569 tags, 500
-  wells). run_generator backfills land_telemetry and land_events (about 4.5M telemetry rows and
-  363K events over two years). batch_sources writes the src_\* snapshot tables and the files on the
+  master, functional-location hierarchy, well master, PVT, id crossmap: 1,055 assets, 6,447 tags, 479
+  wells). run_generator backfills land_telemetry and land_events (about 5.2M telemetry rows and
+  937K events over two years). batch_sources writes the src_\* snapshot tables and the files on the
   landing volume (lab, proving, prices, weather, OSDU well/PVT, geometry, imagery, documents), plus the
-  supply network (reservoir to customer) and a fictional customer book of 28 buyers with two years of
+  supply network (reservoir to customer) and a fictional customer book of 21 buyers with two years of
   daily custody deliveries that reconcile to metered production.
 
 - **Landing:**\
@@ -119,9 +149,9 @@ carry COMMENTs.
 
 ## Application features
 
-The app ("Databricks Asset Atlas") opens on the Command Centre. The left menu has six items:
-Command Centre, Assets map, Gas flow chain, Analytics, Recommendation Inbox and Asset & Document
-Explorer. A short tour follows; the full screen-by-screen guide is in
+The app ("Databricks Asset Atlas") opens on the Command Centre. The left menu has five icons
+(hover one to see its name): Command Centre, Gas flow chain, Analytics, Recommendation Inbox and Asset &
+Document Explorer. A short tour follows; the full screen-by-screen guide is in
 [docs/NAVIGATION.md](docs/NAVIGATION.md).
 
 **Command Centre and what opens from it**
@@ -129,24 +159,24 @@ Explorer. A short tour follows; the full screen-by-screen guide is in
   The field rate, the difference from commitment, the current bottleneck, the
   value chain as five pictures (the stop under pressure is red), production against commitment, and
   tiles for deferment, carbon intensity, red assets, ESD trips and open work orders. Everything is
-  clickable.
+  clickable; anything red or amber opens the screen where its cause lives, with the cause
+  highlighted (rows, bars, lines and tiles) and a banner saying why.
 - **Impact analysis** (the flow icon on the top tile):\
   The whole gas path as a Sankey: reservoirs,
-  well pads, gathering hubs, processing trains, compressors, custody meters and the customers the gas
+  well pads and offshore platforms, gathering hubs and manifolds, gas plants, compressors, custody meters and the customers the gas
   is custody-transferred to. Click any stop to highlight everything upstream that feeds it and
   everything downstream it supplies; a speech bubble lists the affected customers with the gas each
   would lose (TJ/d and % of its supply). **Download Impact Details (PDF)** exports the full upstream,
   downstream and customer tables.
 - **Field Map** (the map icon on the top tile):\
-  Every site across the Australian gas basins, grouped
+  Every site across the operator's ten basins, onshore and offshore, grouped
   into "N sites" bubbles; hover a site for its details, click it to open its **Site view**.
 - **Site view:**\
   The site's equipment with a tag over each asset; click an asset or its tag to slide in its full detail.
+  Onshore sites sit on an outback pad; offshore platforms and manifolds sit on a steel deck over a soft
+  blue sea with boats, buoys, gulls and other platforms around them.
 
 **Menu**
-- **Assets map:**\
-  Every asset (wellhead, gathering line, compressor, separator, meter, plant unit) on
-  the map, one typed marker each; click one for its detail.
 - **Gas flow chain:**\
   The five value-chain stops as tabs: Reservoirs & Wells, Gathering & Flow
   Assurance (hydrate margin), Processing / CPF (dewpoint and spec margins), Compression Health (the
@@ -163,7 +193,7 @@ Explorer. A short tour follows; the full screen-by-screen guide is in
 - **Asset & Document Explorer:**\
   Resolve any tag end to end on the left (decoded key, asset link,
   functional location, latest reading with its normal range, and its ids in every other system) and
-  browse the physical-location tree on the right (field to area to asset to tag).
+  browse the physical-location tree on the right (field to basin to site to asset to tag).
 
 **Across every screen**
 - Sortable tables with an **i** on every column; table rows open a detail panel (a work-order row opens
@@ -338,12 +368,16 @@ gas-upstream-digital-twin/
     jobs.yml            #   setup (data gen), surfaces (Genie+dashboard), Lakebase setup + first sync
     app.yml             #   the Databricks App
   app/                  # FastAPI backend (main.py) + single-page UI (static/)
+                        #   static/models: the painted 3D models (Meshy, meshopt-compressed GLB)
+                        #   static/vendor: Three.js and its loaders, vendored (no CDN at run time)
   generator/            # synthetic OT/IT data generation
   pipelines/            # bronze / silver / gold transforms
   serving/              # Genie space, dashboard and Lakebase (synced tables + sync schedule) builders
   config/               # twin_config.yaml (field size, scenarios, seed)
   scripts/              # deploy, cleanup, generate_data (.sh + .ps1), shared helpers in lib/
   docs/                 # architecture.html, architecture.png, NAVIGATION.md, TROUBLESHOOTING.md
+  tools/meshy/          # optional: the scripts and prompts that made the 3D models and icons with Meshy
+                        #   (needs your own Meshy API key in $MESHY_API_KEY or ~/.meshy_key; not used at deploy)
 ```
 
 ---

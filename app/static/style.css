@@ -219,10 +219,7 @@ tr.rowclick{cursor:pointer}
 .faclegend{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px;color:var(--muted)}
 .fl-item{display:flex;align-items:center;gap:6px}
 .fl-ic{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;color:#fff;font-size:10px;font-weight:700}
-.facdiv{background:none;border:none}
-.facpin{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;color:#fff;font-size:11px;font-weight:700;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.4)}
 /* item 15: mixed-type aggregate cluster shown as a magnifying glass + count */
-.faccluster{background:none;border:none}
 .maplegend{font-size:12.5px;color:#30414b;background:#eef3fb;border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:-6px 0 12px;display:inline-block}
 .sitecl div{width:auto;min-width:30px;padding:0 9px;white-space:nowrap;display:inline-block}
 .sitecl{display:flex;justify-content:center;background-clip:padding-box;width:auto!important}
@@ -231,7 +228,6 @@ tr.rowclick{cursor:pointer}
 .sitetip{font-size:12px;line-height:1.5;color:#1f2b33}
 .sitetip b{font-size:13px}
 .st-r{color:#c8432b;font-weight:600}.st-a{color:#b07d1c;font-weight:600}.st-g{color:#23845f;font-weight:600}
-.facmag{display:inline-flex;align-items:center;gap:4px;background:var(--accent);color:#fff;border:2px solid #fff;border-radius:14px;padding:3px 10px;font-size:12px;font-weight:700;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 
 /* items 12/13: asset detail drawer (right side, overlay) */
 #drawerwrap{position:fixed;inset:0;z-index:1000;visibility:hidden}
@@ -267,7 +263,6 @@ svg.spark{width:100%;height:48px;display:block}
 .cm-body svg{width:100%;height:auto}
 
 /* item 7: 3D hover tooltip: absolutely positioned + non-interactive so it never reflows the canvas */
-.tip3d{position:absolute;pointer-events:none;z-index:6;background:rgba(16,24,34,.9);color:#eef4fb;padding:6px 9px;border-radius:7px;font-size:11px;line-height:1.4;max-width:210px;display:none;box-shadow:0 2px 10px rgba(0,0,0,.3)}
 
 /* ===== review pass 4 (items 23/27/28) ===== */
 /* item 23: period subtitle under a cross-cutting tab heading */
@@ -399,3 +394,98 @@ tr.worow:hover td{background:#f2f6fc}
 .barsvg{display:block}
 .barscroll{overflow-x:auto;max-width:100%}
 .barsvg .ax,.barsvg .axb{font-size:10.5px}
+/* engineer's comic speech bubble in the site view: inked border, tail pointing down at his head */
+.speech3d{position:absolute;z-index:7;pointer-events:none;display:none;transform:translate(-24%,calc(-100% - 18px));
+  max-width:230px;padding:10px 14px;background:#fffdf6;color:#111;border:3px solid #111;border-radius:18px;
+  font:800 14px/1.25 "Trebuchet MS","Arial Black",sans-serif;letter-spacing:.2px;text-transform:uppercase;
+  box-shadow:3px 4px 0 rgba(0,0,0,.35)}
+.speech3d.on{display:block;animation:speechpop .28s cubic-bezier(.2,1.6,.4,1)}
+.speech3d::after{content:"";position:absolute;left:22%;bottom:-17px;width:0;height:0;border:9px solid transparent;
+  border-top:15px solid #111;border-bottom:0;transform:skewX(-22deg)}
+.speech3d::before{content:"";position:absolute;left:calc(22% + 3px);bottom:-11px;width:0;height:0;border:6px solid transparent;
+  border-top:11px solid #fffdf6;border-bottom:0;transform:skewX(-22deg);z-index:1}
+@keyframes speechpop{0%{transform:translate(-24%,calc(-100% - 18px)) scale(.4);opacity:0}100%{transform:translate(-24%,calc(-100% - 18px)) scale(1);opacity:1}}
+/* thought bubble: a cloud with two little trailing puffs down to his head (replaces the speech tail) */
+.speech3d.thought{border-radius:46px;padding:14px 18px;transform:translate(-30%,calc(-100% - 52px));text-transform:none;font:700 14px/1.3 "Trebuchet MS",sans-serif;
+  box-shadow:3px 4px 0 rgba(0,0,0,.30),inset 0 0 0 2px #fffdf6}
+.speech3d.thought.on{animation:thoughtpop .32s cubic-bezier(.2,1.6,.4,1)}
+.speech3d.thought::before,.speech3d.thought::after{display:none}
+.speech3d.thought i{position:absolute;background:#fffdf6;border:3px solid #111;border-radius:50%}
+.speech3d.thought i.p1{width:16px;height:16px;left:26%;bottom:-24px}
+.speech3d.thought i.p2{width:9px;height:9px;left:calc(26% - 9px);bottom:-38px}
+@keyframes thoughtpop{0%{transform:translate(-30%,calc(-100% - 52px)) scale(.4);opacity:0}100%{transform:translate(-30%,calc(-100% - 52px)) scale(1);opacity:1}}
+/* menu icons: hand-drawn blue-flame doodles; on the active (blue) row the icon sits on a white chip */
+.nav-item.has-ic{justify-content:flex-start;gap:10px;padding:5px 9px}
+.nav-ic{width:30px;height:30px;flex:0 0 30px;object-fit:contain;border-radius:6px}
+.nav-item.active .nav-ic{background:#ffffff;padding:1px}
+/* full-screen site view: the menu slides out to the left, the site list moves into its place and the
+   3D landscape takes the rest of the screen; the ✕ on the landscape brings the normal layout back */
+.shell{transition:grid-template-columns .32s cubic-bezier(.22,.61,.36,1)}
+.nav{transition:transform .32s cubic-bezier(.22,.61,.36,1),opacity .25s}
+.viewwrap{transition:margin .32s cubic-bezier(.22,.61,.36,1)}
+body.immersive .shell{grid-template-columns:0 1fr}
+body.immersive .nav{transform:translateX(-100%);opacity:0;pointer-events:none;overflow:hidden;padding:0;border:0}
+body.immersive .viewwrap{margin:8px 10px 10px 10px;--tail-op:0}
+body.immersive .view{padding:10px}
+body.immersive .nav3 .n3-left{animation:n3slide .38s cubic-bezier(.22,.61,.36,1)}
+@keyframes n3slide{from{transform:translateX(-60px);opacity:0}to{transform:none;opacity:1}}
+.n3-close{display:none;position:absolute;top:10px;right:12px;z-index:6;width:32px;height:32px;border-radius:50%;border:2px solid #111;
+  background:#fffdf6;color:#111;font:700 15px/1 sans-serif;cursor:pointer;box-shadow:2px 3px 0 rgba(0,0,0,.25)}
+.n3-close:hover{background:#ffffff;transform:scale(1.06)}
+body.immersive .n3-close{display:block}
+.n3-close{transition:opacity .2s}
+.nav3:has(.n3-right.open) .n3-close{opacity:0;pointer-events:none}   /* the detail drawer has its own ✕ */
+/* icon-only left menu: bigger icons, the name shows as a label when you hover (or tab to) an icon */
+.shell{grid-template-columns:76px 1fr}
+.nav{overflow:visible;padding:8px 6px;position:relative;z-index:20}
+.nav-item.has-ic{justify-content:center;padding:6px;margin-bottom:6px;position:relative}
+.nav-ic{width:46px;height:46px;flex:0 0 46px}
+.nav-item.has-ic > span{position:absolute;left:calc(100% + 12px);top:50%;transform:translate(-6px,-50%);white-space:nowrap;
+  background:#1c2a38;color:#fff;font-weight:600;font-size:12.5px;padding:6px 10px;border-radius:7px;box-shadow:0 4px 14px rgba(16,24,34,.25);
+  opacity:0;pointer-events:none;transition:opacity .15s,transform .15s;z-index:30}
+.nav-item.has-ic > span::before{content:"";position:absolute;left:-5px;top:50%;width:10px;height:10px;background:#1c2a38;transform:translateY(-50%) rotate(45deg)}
+.nav-item.has-ic:hover > span,.nav-item.has-ic:focus-visible > span{opacity:1;transform:translate(0,-50%)}
+/* site list: only as wide as the site names, the rest goes to the 3D view */
+.nav3{grid-template-columns:168px 1fr}
+.nav3 .n3-left{padding:10px 8px}
+.nav3 .scene-item{padding-left:8px;padding-right:8px}
+/* menu icons a notch bigger */
+.shell{grid-template-columns:84px 1fr}
+.nav-ic{width:54px;height:54px;flex:0 0 54px}
+/* site list: grouped by kind, each site with its place underneath */
+.scene-grp{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:10px 8px 4px;border-bottom:1px solid var(--line);margin-bottom:2px}
+.scene-grp:first-child{padding-top:2px}
+.scene-item .sc-nm{display:flex;flex-direction:column;line-height:1.25}
+.scene-item .sc-pl{font-size:10.5px;color:var(--muted);font-weight:400}
+.scene-item.active .sc-pl{color:#ffffffcc}
+.scene-grp{color:#0068b8;border-bottom-color:#9fd2f2}   /* a darker shade of the icons' flame blue (#0090F0) */
+/* collapsible site-list groups: click a heading to fold its sites away */
+.scene-grp{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;border-bottom:1px solid #9fd2f2;cursor:pointer;text-align:left;font:inherit;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#0068b8}
+.scene-grp:hover{color:#004f8c}
+.scene-grp .sg-n{font-weight:600;color:#7aa7cf;letter-spacing:0}
+.scene-grp .sg-ar{margin-left:auto;width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg);transition:transform .2s;margin-right:3px}
+.scene-sec.closed .sg-ar{transform:rotate(-45deg)}
+.scene-sec .scene-items{overflow:hidden}
+.scene-sec.closed .scene-items{display:none}
+.scene-sec + .scene-sec .scene-grp{margin-top:6px}
+.imp-lead{stroke:#8c9aa6;stroke-width:0.8;fill:none}   /* leader from a nudged customer label back to its bar */
+.trow.basin .tlabel{font-weight:700;color:#0068b8;font-size:13.5px}   /* the location level (basin) of the physical-location tree */
+.trow.area .tlabel{font-weight:500}
+/* the cause of a red / amber Command Centre element, carried to the screen it opens */
+.focus-banner{display:flex;align-items:center;gap:12px;padding:12px 16px;margin:0 0 14px;border-radius:12px;border:1px solid var(--line);border-left:5px solid var(--emb);background:#fdf1ec;font-size:13.5px;color:#122029}
+.focus-banner.amber{border-left-color:var(--amb);background:#fdf5e4}
+.focus-banner .fb-dot{width:12px;height:12px;border-radius:50%;background:var(--emb);flex:0 0 12px;box-shadow:0 0 0 4px rgba(221,75,26,.18)}
+.focus-banner.amber .fb-dot{background:var(--amb);box-shadow:0 0 0 4px rgba(224,165,58,.22)}
+.focus-banner .fb-t{flex:1}
+.focus-banner .fb-x{border:none;background:none;font-size:15px;cursor:pointer;color:#5f7185;padding:2px 6px}
+tr.focus-red td{background:#fbe1d6 !important}
+tr.focus-amber td{background:#fcedcc !important}
+tr.focus-red td:first-child{box-shadow:inset 4px 0 0 var(--emb)}
+tr.focus-amber td:first-child{box-shadow:inset 4px 0 0 var(--amb)}
+.kpi.focus-red{box-shadow:inset 0 0 0 2px var(--emb);background:#fdf1ec}
+.kpi.focus-amber{box-shadow:inset 0 0 0 2px var(--amb);background:#fdf5e4}
+.chart .line.fhi{stroke-width:3.2}
+.chart .line.fdim{opacity:.28}
+:root{--emb:#dd4b1a;--amb:#c98a1e}   /* the Command Centre's red / amber, for the highlights on other screens */
+tr.row-amber td{background:#fdf5e4}   /* a row whose status is amber (watch, due...) */
+tr.row-red td{background:#fdece6}     /* a row whose status is red (at risk, high, not passed...) */

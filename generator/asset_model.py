@@ -130,19 +130,80 @@ def _scatter(rng: random.Random, lat: float, lon: float, deg: float) -> tuple[fl
     return round(lat + rng.uniform(-deg, deg), 6), round(lon + rng.uniform(-deg, deg), 6)
 
 
-# Real Australian gas basins (onshore / nearshore producing hubs). The operator's portfolio distributes
-# across these, so the twin shows a complete value chain where gas is actually produced in Australia.
-AU_BASINS = [
-    ("Surat", -26.60, 150.10),          # QLD CSG (Wallumbilla hub)
-    ("Bowen", -22.50, 148.50),          # QLD CSG/conventional
-    ("Cooper-Eromanga", -27.70, 140.20),  # SA/QLD (Moomba hub)
-    ("Carnarvon", -20.70, 116.80),      # WA North West Shelf
-    ("Perth", -29.30, 115.05),          # WA (Waitsia/Dongara)
-    ("Gippsland", -38.30, 147.60),      # VIC (Longford)
-    ("Otway", -38.40, 142.40),          # VIC/SA
-    ("Beetaloo", -16.80, 134.50),       # NT shale
-    ("Amadeus", -24.00, 132.00),        # NT (Mereenie)
-]
+def site_layout(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Where every site sits, from config: the producing basins (pads or offshore platforms, wells per pad, CSG
+    share, hubs), the gas plants (each at its real town, in its basin) and the custody points (each at a real
+    export location).
+
+    Onshore pads (BAR001..) and offshore platforms (PLT001..) are numbered basin by basin in config order, as are
+    onshore gathering hubs (GTH001..) and offshore manifolds (MNF001..). Each basin's hubs take its pads
+    round-robin and feed that basin's plants round-robin (the nearest plant when the basin has none), so gas is
+    always processed where it is produced. A hub sits at the centre of the pads it gathers. Deterministic, and
+    shared by build_semantic_backbone and supply_network so the map and the network always agree."""
+    seed = int(cfg["seed"])
+    rg = _rng(seed, "layout")
+    basins = {b["name"]: b for b in cfg["basins"]}
+    prefix = cfg["wellpads"]["prefix"]
+    pads, hubs, geo, offshore = [], [], {}, set()
+    cnt = {"pad": 0, "plt": 0, "gth": 0, "mnf": 0}
+    for b in cfg["basins"]:
+        off = bool(b.get("offshore"))
+        locs = b.get("locations") or []
+        mine = []
+        for k in range(int(b["pads"])):
+            if off:
+                cnt["plt"] += 1; a = f"PLT{cnt['plt']:03d}"
+                la, lo = locs[k % len(locs)] if locs else (b["lat"], b["lon"])
+                geo[a] = _scatter(rg, float(la), float(lo), 0.04)
+                offshore.add(a)
+            else:
+                cnt["pad"] += 1; a = f"{prefix}{cnt['pad']:03d}"
+                geo[a] = _scatter(rg, float(b["lat"]), float(b["lon"]), float(b.get("spread", 0.3)))
+            pads.append((a, b["name"])); mine.append(a)
+        nh = max(1, int(b.get("hubs", 1)))
+        for k in range(nh):
+            if off:
+                cnt["mnf"] += 1; h = f"MNF{cnt['mnf']:03d}"; offshore.add(h)
+            else:
+                cnt["gth"] += 1; h = f"GTH{cnt['gth']:03d}"
+            hubs.append((h, b["name"]))
+            fed = mine[k::nh] or mine
+            la = sum(geo[x][0] for x in fed) / len(fed); lo = sum(geo[x][1] for x in fed) / len(fed)
+            geo[h] = _scatter(rg, la, lo, 0.03 if off else 0.08)
+    trains = {t["area"]: t["basin"] for t in cfg["cpf"]["trains"]}
+    for t in cfg["cpf"]["trains"]:
+        geo[t["area"]] = (float(t["lat"]), float(t["lon"]))
+    meters = {st["area"]: st for st in cfg["custody"]["stations"]}
+    for m, st in meters.items():
+        geo[m] = (float(st["lat"]), float(st["lon"]))
+    hubs_in, trains_in = {}, {}
+    for a, b in hubs:
+        hubs_in.setdefault(b, []).append(a)
+    for a, b in trains.items():
+        trains_in.setdefault(b, []).append(a)
+    seen, pad_hub = {}, {}
+    for a, b in pads:
+        hs = hubs_in[b]; pad_hub[a] = hs[seen.get(b, 0) % len(hs)]; seen[b] = seen.get(b, 0) + 1
+    hub_train = {}
+    for b, hs in hubs_in.items():
+        for k, a in enumerate(hs):
+            ts = trains_in.get(b) or [min(trains, key=lambda t: (geo[t][0] - geo[a][0]) ** 2 + (geo[t][1] - geo[a][1]) ** 2)]
+            hub_train[a] = ts[k % len(ts)]
+    return {"basins": basins, "pads": pads, "hubs": hubs, "trains": trains, "meters": meters,
+            "pad_hub": pad_hub, "hub_train": hub_train, "geo": geo, "offshore": offshore}
+
+
+def site_condition(cfg: dict[str, Any], area: str) -> str:
+    """The site's overall condition (green, amber or red), drawn once per site from config odds (seeded) or
+    pinned for the scenario story sites. Work orders, trips and equipment wear all follow it, so the App's
+    site colours land in realistic proportions: mostly healthy, some needing attention, a few critical."""
+    sc = cfg.get("site_condition") or {}
+    pin = (sc.get("pinned") or {}).get(area)
+    if pin:
+        return pin
+    odds = sc.get("odds") or {"green": 0.72, "amber": 0.19, "red": 0.09}
+    h = _rng(int(cfg["seed"]), "cond:" + area).random()
+    return "red" if h < odds.get("red", 0.09) else ("amber" if h < odds.get("red", 0.09) + odds.get("amber", 0.19) else "green")
 
 
 class _TagNum:
@@ -159,7 +220,6 @@ def build_semantic_backbone(cfg: dict[str, Any]) -> dict[str, list[dict]]:
     """Return the six backbone tables as lists of dict rows, deterministic in cfg['seed']."""
     seed = int(cfg["seed"])
     field = cfg["field"]
-    clat, clon, scatter = float(field["center_lat"]), float(field["center_lon"]), float(field["scatter_deg"])
     scheme = cfg["tag_scheme"]
 
     rg = _rng(seed, "geo")
@@ -182,7 +242,7 @@ def build_semantic_backbone(cfg: dict[str, Any]) -> dict[str, list[dict]]:
     site_id = f"FL-{field_code}-SITE"
     fl.append(_fl(site_id, None, "Site", field_code, f"{field['name']} Gas Field", None, None, None, None, today))
 
-    def add_asset(area, system, etype, cls, seq_hint, scene_id, lat, lon, crit=None):
+    def add_asset(area, system, etype, cls, seq_hint, scene_id, lat, lon, crit=None, ranges=None):
         """Create one asset + its tags from SIGNAL_SPECS, wired to the functional-location tree."""
         n = tn.next(area)
         asset_id = f"{area}-{system}-{cls}-{n:04d}"
@@ -202,6 +262,8 @@ def build_semantic_backbone(cfg: dict[str, Any]) -> dict[str, list[dict]]:
             "effective_from": today, "is_current": True,
         })
         for (signal, scls, unit, rmin, rmax, moc, cadence) in SIGNAL_SPECS.get(etype, []):
+            if ranges and signal in ranges:                 # sized to the gas this asset actually carries
+                rmax = max(rmax, ranges[signal])
             tnum = tn.next(area)
             tag_id = scheme.format(area=area, system=system, **{"class": scls}, nnnn=tnum)
             tags.append({
@@ -233,129 +295,147 @@ def build_semantic_backbone(cfg: dict[str, Any]) -> dict[str, list[dict]]:
                       cfg["systems"].get(system, {}).get("name", system), area, system, None, None, today))
 
     # =========================================================================================
-    # Well pads + wells + wellheads + artificial lift
+    # Well pads / offshore platforms + wells + wellheads + artificial lift
     # =========================================================================================
     wp = cfg["wellpads"]
-    npads, prefix, wells_total = int(wp["count"]), wp["prefix"], int(wp["wells_total"])
-    csg_frac, gl_frac = float(wp["csg_fraction"]), float(wp["gas_lift_fraction"])
-    # distribute wells across pads roughly evenly
-    per_pad = [wells_total // npads] * npads
-    for i in range(wells_total - sum(per_pad)):
-        per_pad[i % npads] += 1
+    gl_frac = float(wp["gas_lift_fraction"])
+    lay = site_layout(cfg)
+    geo = lay["geo"]
+    rn = _rng(seed, "wellcount")
+    pot = {}      # well -> test potential (10^3 m^3/d), so the network nodes can size their flow ranges
 
     well_seq = 0
-    for p in range(1, npads + 1):
-        area = f"{prefix}{p:03d}"
-        basin = AU_BASINS[(p - 1) % len(AU_BASINS)]        # distribute pads across real AU gas basins
-        plat, plon = _scatter(rg, basin[1], basin[2], 0.30)
-        add_area(area, f"Well pad {area} ({basin[0]} Basin)", plat, plon)
+    for area, bname in lay["pads"]:
+        basin = lay["basins"][bname]
+        off = area in lay["offshore"]
+        plat, plon = geo[area]
+        add_area(area, f"{'Wellhead platform' if off else 'Well pad'} {area} ({bname} Basin)", plat, plon)
+        lo, hi = basin["wells_per_pad"]
+        csg_frac = float(basin["csg_fraction"])
+        r_lo, r_hi = basin.get("well_rate", [40, 160])
+        c_lo, c_hi = basin.get("co2_molpct", [0.2, 7.0])
+        h_lo, h_hi = basin.get("h2s_ppm", [0, 400])
+        d_lo, d_hi = basin.get("td_m", [900, 3200])
+        n_wells = rn.randint(int(lo), int(hi))
         add_system(area, "WB")
         add_system(area, "AL")
         scene_wh = f"scene_{area}_wh"
-        for _ in range(per_pad[p - 1]):
+        for _ in range(n_wells):
             well_seq += 1
             well_id = f"{area}-W{well_seq:03d}"
             is_csg = rw.random() < csg_frac
             completion = "csg" if is_csg else "conventional"
             if is_csg:
                 lift = "esp"
+            elif off:
+                lift = "natural"                     # offshore gas wells flow on reservoir pressure
             elif rw.random() < gl_frac:
                 lift = "gas_lift"
             else:
                 lift = rw.choice(["natural", "plunger"])
             crit = rw.choices(CRITICALITY_TIERS, weights=[0.2, 0.5, 0.3])[0]
-            wlat, wlon = _scatter(rg, plat, plon, 0.03)   # wells sit tight around their pad
-            wh_asset = add_asset(area, "WB", "wellhead", "VE", well_seq, scene_wh, wlat, wlon, crit)
+            if off:
+                crit = rw.choices(CRITICALITY_TIERS, weights=[0.6, 0.35, 0.05])[0]   # big offshore wells: mostly A
+            potential = round(float(r_lo) + (float(r_hi) - float(r_lo)) * rw.random(), 1)
+            wlat, wlon = _scatter(rg, plat, plon, 0.004 if off else 0.03)   # offshore: one deck; onshore: around the pad
+            wh_asset = add_asset(area, "WB", "wellhead", "VE", well_seq, scene_wh, wlat, wlon, crit,
+                                 ranges={"production_flow": round(potential * 1.5, -1)})
+            pot[wh_asset] = potential
             if lift == "esp":
                 add_asset(area, "AL", "esp", "PU", well_seq, scene_wh, wlat, wlon, crit)
             elif lift == "gas_lift":
                 add_asset(area, "AL", "gas_lift", "VL", well_seq, scene_wh, wlat, wlon, crit)
             wells.append({
                 "well_id": well_id, "pad_area": area, "fl_id": f"FL-{wh_asset}",
-                "name": f"{field['name']} {well_id}", "spud_date": f"{rw.randint(2010, 2022)}-0{rw.randint(1,9)}-15",
-                "td_m": rw.randint(900, 3200), "deviation_type": rw.choice(["vertical", "deviated", "horizontal"]),
+                "name": f"{field['name']} {well_id}", "spud_date": f"{rw.randint(2006 if off else 2010, 2022)}-0{rw.randint(1,9)}-15",
+                "td_m": rw.randint(int(d_lo), int(d_hi)),
+                "deviation_type": rw.choice(["deviated", "deviated", "horizontal"]) if off else ("vertical" if is_csg and rw.random() < 0.7 else rw.choice(["vertical", "deviated", "horizontal"])),
                 "completion_type": completion, "lift_type": lift, "criticality": crit,
-                "status": "producing", "wellhead_asset_id": wh_asset,
+                "status": "producing", "wellhead_asset_id": wh_asset, "potential_e3m3d": potential,
+                "plant": lay["hub_train"][lay["pad_hub"][area]],   # the gas plant the well's gas goes to (its turnarounds shut it in)
                 "effective_from": today, "is_current": True,
             })
             pvt.append({
                 "well_id": well_id,
-                "cgr_bbl_mmscf": round(rw.uniform(0.5, 15) if completion == "conventional" else rw.uniform(0.0, 1.0), 2),
-                "wgr_bbl_mmscf": round(rw.uniform(2, 60) if completion == "csg" else rw.uniform(0.5, 10), 2),
-                "gor_scf_bbl": rw.randint(5000, 90000), "gas_sg": round(rw.uniform(0.56, 0.72), 3),
-                "co2_frac_molpct": round(rw.uniform(0.2, 7.0), 2), "n2_frac_molpct": round(rw.uniform(0.3, 3.0), 2),
-                "h2s_ppm": rw.randint(0, 400), "pvt_source": "OSDU",
+                "cgr_bbl_mmscf": round(rw.uniform(0.0, 0.5) if is_csg else (rw.uniform(8, 40) if off else rw.uniform(0.5, 15)), 2),
+                "wgr_bbl_mmscf": round(rw.uniform(20, 120) if is_csg else rw.uniform(0.5, 10), 2),
+                "gor_scf_bbl": rw.randint(5000, 90000), "gas_sg": round(rw.uniform(0.56, 0.60) if is_csg else rw.uniform(0.60, 0.75), 3),
+                "co2_frac_molpct": round(rw.uniform(float(c_lo), float(c_hi)), 2), "n2_frac_molpct": round(rw.uniform(0.3, 3.0), 2),
+                "h2s_ppm": rw.randint(int(h_lo), int(h_hi)), "pvt_source": "OSDU",
                 "effective_from": today, "is_current": True,
             })
 
-    # =========================================================================================
-    # Gathering network
-    # =========================================================================================
-    g = cfg["gathering"]
-    nhubs = max(1, int(g.get("hubs", 1)))
-    nseg = int(g["segments"])
-    # distribute segments across the hubs roughly evenly
-    seg_per = [nseg // nhubs] * nhubs
-    for i in range(nseg - sum(seg_per)):
-        seg_per[i % nhubs] += 1
-    for h in range(nhubs):
-        garea = f"GTH{h + 1:03d}"                              # GTH001 .. GTH0{nhubs}
-        basin = AU_BASINS[h % len(AU_BASINS)]                  # spread the hubs across real AU gas basins
-        glat, glon = _scatter(rg, basin[1], basin[2], 0.2)
-        add_area(garea, f"Gathering network {garea} ({basin[0]} Basin)", glat, glon)
-        add_system(garea, "GL")
-        scene_gth = f"scene_{garea}"
-        for s in range(seg_per[h]):
-            slat, slon = _scatter(rg, glat, glon, 0.12)
-            add_asset(garea, "GL", "gathering_line", "VL", s, scene_gth, slat, slon)
+    # how much gas each site carries at its test potential: sizes the flow ranges of hubs, plants and meters
+    pad_pot = {}
+    for w in wells:
+        pad_pot[w["pad_area"]] = pad_pot.get(w["pad_area"], 0.0) + w["potential_e3m3d"]
+    hub_pot, train_pot, meter_pot = {}, {}, {}
+    for pa, h in lay["pad_hub"].items():
+        hub_pot[h] = hub_pot.get(h, 0.0) + pad_pot.get(pa, 0.0)
+    for h, t in lay["hub_train"].items():
+        train_pot[t] = train_pot.get(t, 0.0) + hub_pot.get(h, 0.0)
+    split = (cfg.get("network") or {}).get("train_custody") or {}
+    for t, v in train_pot.items():
+        for m, sh in (split.get(t) or {}).items():
+            meter_pot[m] = meter_pot.get(m, 0.0) + v * float(sh)
 
     # =========================================================================================
-    # CPF trains + shared process units
+    # Gathering hubs (onshore) and offshore manifold platforms
     # =========================================================================================
-    cpf = cpf_cfg = cfg["cpf"]
-    # processing trains spread across the basins: Train 1 in the Surat Basin, Train 2 in Cooper-Eromanga
-    # (the flagship vibration story lives on CPF002), the remaining trains fan out over the other basins.
-    train_basins = [AU_BASINS[0], AU_BASINS[2]] + [b for i, b in enumerate(AU_BASINS) if i not in (0, 2)]
-    cpf_lat, cpf_lon = AU_BASINS[0][1], AU_BASINS[0][2]
-    first_train_area = cpf["trains"][0]["area"]
-    for ti, train in enumerate(cpf["trains"]):
+    g = cfg["gathering"]
+    s_lo, s_hi = g.get("segments_per_hub", [3, 6])
+    rsg = _rng(seed, "segments")
+    for garea, bname in lay["hubs"]:
+        off = garea in lay["offshore"]
+        glat, glon = geo[garea]
+        add_area(garea, f"{'Offshore manifold' if off else 'Gathering hub'} {garea} ({bname} Basin)", glat, glon)
+        add_system(garea, "GL")
+        scene_gth = f"scene_{garea}"
+        hp = hub_pot.get(garea, 0.0)
+        for s_ in range(rsg.randint(int(s_lo), int(s_hi))):
+            slat, slon = _scatter(rg, glat, glon, 0.004 if off else 0.12)
+            add_asset(garea, "GL", "gathering_line", "VL", s_, scene_gth, slat, slon,
+                      ranges={"line_flow": round(hp * 1.3, -1)})
+
+    # =========================================================================================
+    # Gas plants: inlet separation + compression, then the process units the plant's gas needs
+    # =========================================================================================
+    cpf = cfg["cpf"]
+    UNIT = {"DEH": ("teg_dehydration", "CL"), "AMN": ("amine", "CL"), "NGL": ("ngl_stab", "CL"), "UTL": ("utilities", "GT")}
+    for train in cpf["trains"]:
         area = train["area"]
-        tb = train_basins[ti % len(train_basins)]
-        tlat, tlon = _scatter(rg, tb[1], tb[2], 0.06)
-        add_area(area, f"CPF {train['name']} ({tb[0]} Basin)", tlat, tlon)
+        tlat, tlon = geo[area]
+        tp = train_pot.get(area, 0.0)
+        add_area(area, f"{train['name']} {area} ({train['place']}, {train['basin']} Basin)", tlat, tlon)
         scene_cpf = f"scene_{area}"
-        # separation + compression per train
         add_system(area, "SEP")
         add_asset(area, "SEP", "separator", "VE", 0, scene_cpf, tlat, tlon)
         add_system(area, "CMP")
-        for c in range(int(cpf["compressors_per_train"])):
-            add_asset(area, "CMP", "compressor", "CP", c, scene_cpf, tlat, tlon)
-    # shared process units under the first train area (single TEG/amine/NGL/utilities/flare)
-    area = first_train_area
-    slat, slon = _scatter(rg, cpf_lat, cpf_lon, scatter * 0.05)
-    if cpf.get("has_teg"):
-        add_system(area, "DEH"); add_asset(area, "DEH", "teg_dehydration", "CL", 0, f"scene_{area}", slat, slon)
-    if cpf.get("has_amine"):
-        add_system(area, "AMN"); add_asset(area, "AMN", "amine", "CL", 0, f"scene_{area}", slat, slon)
-    if cpf.get("has_ngl"):
-        add_system(area, "NGL"); add_asset(area, "NGL", "ngl_stab", "CL", 0, f"scene_{area}", slat, slon)
-    if cpf.get("has_utilities"):
-        add_system(area, "UTL"); add_asset(area, "UTL", "utilities", "GT", 0, f"scene_{area}", slat, slon)
-    if cpf.get("has_flare"):
-        add_system(area, "FLR")
-        add_asset(area, "FLR", "flare", "VE", 0, f"scene_{area}", slat, slon)
-        add_asset(area, "FLR", "fire_gas", "GD", 0, f"scene_{area}", slat, slon)
+        nc = int(train.get("compressors", cpf.get("compressors_per_train", 3)))
+        for c in range(nc):
+            add_asset(area, "CMP", "compressor", "CP", c, scene_cpf, tlat, tlon,
+                      ranges={"throughput": round(tp / nc * 1.4, -1), "co2_massrate": round(tp / nc * 2.4, -1)})
+        for u in train.get("units", ["DEH", "AMN", "NGL", "UTL", "FLR"]):
+            ulat, ulon = _scatter(rg, tlat, tlon, 0.01)
+            add_system(area, u)
+            if u == "FLR":
+                add_asset(area, "FLR", "flare", "VE", 0, scene_cpf, ulat, ulon, ranges={"co2_massrate": round(tp * 0.6, -1)})
+                add_asset(area, "FLR", "fire_gas", "GD", 0, scene_cpf, ulat, ulon)
+            else:
+                et, cl = UNIT[u]
+                add_asset(area, u, et, cl, 0, scene_cpf, ulat, ulon,
+                          ranges={"fuel_gas_flow": round(tp * 0.05, -1), "co2_massrate": round(tp * 0.9, -1)})
 
     # =========================================================================================
-    # Custody / export metering stations
+    # Custody / export metering stations (one site each, at its export point)
     # =========================================================================================
-    for si, st in enumerate(cfg["custody"]["stations"]):
+    for st in cfg["custody"]["stations"]:
         area = st["area"]
-        cb = train_basins[si % len(train_basins)]      # custody at the export hubs (Wallumbilla / Moomba)
-        mlat, mlon = _scatter(rg, cb[1], cb[2], 0.08)
-        add_area(area, f"{st['name']} ({cb[0]} Basin)", mlat, mlon)
+        mlat, mlon = _scatter(rg, *geo[area], 0.01)
+        add_area(area, f"{st['name']} {area} ({st['place']}, {st['basin']} Basin)", mlat, mlon)
         add_system(area, "MET")
-        add_asset(area, "MET", "metering", "FE", 0, f"scene_MET", mlat, mlon, crit="A")
+        add_asset(area, "MET", "metering", "FE", 0, f"scene_{area}", mlat, mlon, crit="A",
+                  ranges={"meter_flow": round(meter_pot.get(area, 0.0) * 1.3, -1)})
 
     return {
         "functional_location": fl,
@@ -389,41 +469,25 @@ if __name__ == "__main__":
 # =============================================================================================
 # Supply network: the physical gas path as directed edges, for impact analysis
 # =============================================================================================
-# The producing formation per basin (one reservoir node per basin the field produces from).
-RESERVOIRS = {
-    "Surat": "Walloon Coal Measures", "Bowen": "Bandanna Coal Measures",
-    "Cooper-Eromanga": "Patchawarra Formation", "Carnarvon": "Mungaroo Formation",
-    "Perth": "Kingia Sandstone", "Gippsland": "Latrobe Group", "Otway": "Waarre Sandstone",
-    "Beetaloo": "Velkerri Shale", "Amadeus": "Pacoota Sandstone",
-}
 
 
 def _reservoir_id(basin: str) -> str:
-    return "RES-" + basin.split("-")[0].upper()          # RES-SURAT, RES-COOPER, RES-BEETALOO ...
+    return "RES-" + basin.split("-")[0].upper()          # RES-SURAT, RES-COOPER, RES-CARNARVON ...
 
 
 def supply_network(cfg: dict[str, Any], bb: dict[str, list[dict]]) -> list[dict]:
     """Directed edges reservoir -> well pad -> gathering hub -> processing train -> compressor ->
     custody meter -> customer, each with the share of the from-node's outflow that takes the edge.
 
-    Placement mirrors build_semantic_backbone exactly (pads, hubs, trains and meters are assigned to
-    basins by the same round-robin), so the network always agrees with the map. Deterministic.
+    Placement comes from site_layout (the same layout build_semantic_backbone uses), so the network always
+    agrees with the map: gas is gathered and processed in its own basin. Deterministic.
     """
-    nb = len(AU_BASINS)
-    geo = {b[0]: (b[1], b[2]) for b in AU_BASINS}
     names = {r["code"]: r["name"] for r in bb["functional_location"] if r.get("level") == "Area"}
-    wp = cfg["wellpads"]
-    pad_basin = {f"{wp['prefix']}{p:03d}": AU_BASINS[(p - 1) % nb][0] for p in range(1, int(wp["count"]) + 1)}
-    hub_basin = {f"GTH{h + 1:03d}": AU_BASINS[h % nb][0] for h in range(max(1, int(cfg["gathering"].get("hubs", 1))))}
-    train_basins = [AU_BASINS[0], AU_BASINS[2]] + [b for i, b in enumerate(AU_BASINS) if i not in (0, 2)]
-    trains = [t["area"] for t in cfg["cpf"]["trains"]]
-    train_basin = {a: train_basins[i % nb][0] for i, a in enumerate(trains)}
-    meters = [st["area"] for st in cfg["custody"]["stations"]]
-    meter_basin = {a: train_basins[i % nb][0] for i, a in enumerate(meters)}
-
-    def dist(b1, b2):
-        (la1, lo1), (la2, lo2) = geo[b1], geo[b2]
-        return ((la1 - la2) ** 2 + (lo1 - lo2) ** 2) ** 0.5
+    lay = site_layout(cfg)
+    formation = {b["name"]: b.get("reservoir", b["name"]) for b in cfg["basins"]}
+    pad_basin, hub_basin, train_basin = dict(lay["pads"]), dict(lay["hubs"]), lay["trains"]
+    trains = list(train_basin)
+    meter_basin = {a: st.get("basin") for a, st in lay["meters"].items()}
 
     edges = []
 
@@ -433,21 +497,14 @@ def supply_network(cfg: dict[str, Any], bb: dict[str, list[dict]]) -> list[dict]
 
     # reservoir -> pad (the pad's own production decides the split, so share is flow-determined: null)
     # pad -> hub: every pad ties into one hub in its basin (round-robin when the basin has several)
-    hubs_in = {}
-    for h, b in sorted(hub_basin.items()):
-        hubs_in.setdefault(b, []).append(h)
-    seen = {}
     for pad, b in sorted(pad_basin.items()):
         rid = _reservoir_id(b)
-        edge(rid, f"{RESERVOIRS.get(b, b)} ({b} Basin)", "reservoir", pad, names.get(pad, pad), "wells", None, b)
-        hs = hubs_in.get(b) or [min(hub_basin, key=lambda h: dist(hub_basin[h], b))]
-        hub = hs[seen.get(b, 0) % len(hs)]
-        seen[b] = seen.get(b, 0) + 1
+        edge(rid, f"{formation.get(b, b)} ({b} Basin)", "reservoir", pad, names.get(pad, pad), "wells", None, b)
+        hub = lay["pad_hub"][pad]
         edge(pad, names.get(pad, pad), "wells", hub, names.get(hub, hub), "gathering", 1.0, b)
-    # hub -> train: the train in the hub's basin, else the nearest train
+    # hub -> train: a train in the hub's own basin (round-robin when the basin has several)
     for hub, b in sorted(hub_basin.items()):
-        same = [t for t, tb in train_basin.items() if tb == b]
-        train = same[0] if same else min(train_basin, key=lambda t: dist(train_basin[t], b))
+        train = lay["hub_train"][hub]
         edge(hub, names.get(hub, hub), "gathering", train, names.get(train, train), "processing", 1.0, b)
     # train -> its compressors (parallel units share the train's throughput equally)
     comps = {}
@@ -457,7 +514,7 @@ def supply_network(cfg: dict[str, Any], bb: dict[str, list[dict]]) -> list[dict]
     split = (cfg.get("network") or {}).get("train_custody") or {}
     for train in trains:
         units = sorted(comps.get(train, []))
-        mshare = split.get(train) or {min(meter_basin, key=lambda m: dist(meter_basin[m], train_basin[train])): 1.0}
+        mshare = split.get(train) or {next(m for m, b in meter_basin.items() if b == train_basin[train]): 1.0}
         for u in units:
             edge(train, names.get(train, train), "processing", u, f"{u} compressor", "compression", 1.0 / len(units), train_basin[train])
             for m, s in sorted(mshare.items()):

@@ -5,21 +5,22 @@
 # AREA-SYSTEM-CLASS-NNNN, wells, PVT, gathering topology, 3D scenes). The medallion and the two
 # surfaces (App + Genie) bind to the tag_id contract this produces.
 #
-# Cardinality is a large-operator footprint across the Australian basins: 500 producing wells on 50
-# pads, 12 gathering hubs, two CPFs with five processing trains (15 compressors, TEG dehydration,
-# amine/AGRU, NGL, utilities, flare), four custody/export metering stations and 28 (fictional)
-# customers. Tag counts are scaled to a demo-sane size while the physics stays real.
+# Cardinality is a national operator across all of Australia in realistic proportions: Queensland coal seam
+# gas (Surat, Bowen), the Cooper, Perth and Amadeus onshore basins, and the offshore Carnarvon (North West
+# Shelf), Browse, Bonaparte, Gippsland (Bass Strait) and Otway basins; 118 onshore well pads and 17 offshore
+# wellhead platforms, gathering hubs and offshore manifolds, thirteen gas plants at their real towns, twelve
+# custody/export points and 31 (fictional) customers. Gas is gathered and processed in the basin it is
+# produced in. Tag counts are scaled to a demo-sane size while the physics stays real.
 
 seed: 20260930            # deterministic: same seed => same field, same trips, same numbers
 
 field:
   name: Barwon            # generic AU-style hero gas field (re-skins by swapping the seed)
   operator: Generic Upstream Operator (synthetic)
-  basin: Surat            # Queensland CSG + conventional blend
-  # map anchor for the Australia map view (H3-indexed downstream); pads/facilities scatter around this
-  center_lat: -26.55
-  center_lon: 150.10
-  scatter_deg: 0.65       # +/- degrees the pads/facilities spread around the anchor
+  basin: National         # every producing region in Australia, onshore and offshore
+  # map anchor for the Australia map view; sites sit in their basins (see basins below)
+  center_lat: -26.50
+  center_lon: 134.00
 
 # ---------------------------------------------------------------------------------------------
 # Tag scheme (Design 6.1): AREA-SYSTEM-CLASS-NNNN, e.g. BAR008-WB-VL-2555. The on-asset tag IS
@@ -80,54 +81,98 @@ value_chain_stops:
 # Field estate (Design Part 9.8). Areas carry the AREA token; the generator distributes wells,
 # assets, and tags across them and assigns geolocations for the map + 3D scenes.
 # ---------------------------------------------------------------------------------------------
+# Producing basins, all of Australia in realistic proportions. Onshore basins produce from fenced well
+# pads (BAR001..) tied into gathering hubs (GTH001..); offshore basins produce from wellhead platforms
+# (PLT001..) tied into offshore manifold platforms (MNF001..) and a trunkline to an onshore gas plant.
+# Pads are numbered basin by basin in this order; each basin's hubs take its pads round-robin.
+#   pads / wells_per_pad [min, max] (seeded) / csg_fraction = share of coal seam gas (ESP-dewatered) wells
+#   well_rate [min, max]  = well test potential, 10^3 m^3/d (CSG ~0.5-1.6 MMscf/d .. big offshore wells ~25 MMscf/d)
+#   co2_molpct, h2s_ppm   = raw-gas composition ranges (CSG is near pure methane; Carnarvon/Browse carry CO2)
+#   td_m                  = drilled depth range (CSG is shallow)
+#   locations             = offshore: the real field areas the platforms stand on (cycled, with a small jitter);
+#                           onshore pads scatter by `spread` degrees around the basin centre
+# Sites are QLD CSG pads in the main (as in reality: thousands of low-rate wells), while a handful of
+# offshore WA/NT/VIC platforms carry most of the gas (as the North West Shelf, Gorgon, Ichthys and Bass Strait do).
+basins:
+  - {name: Surat,           state: QLD,    reservoir: Walloon Coal Measures,   lat: -26.85, lon: 150.25, spread: 0.60, pads: 64, wells_per_pad: [2, 6], csg_fraction: 0.97, hubs: 8, well_rate: [15, 45],  co2_molpct: [0.1, 1.5], h2s_ppm: [0, 2],   td_m: [400, 1100]}
+  - {name: Bowen,           state: QLD,    reservoir: Bandanna Coal Measures,  lat: -25.55, lon: 148.85, spread: 0.45, pads: 26, wells_per_pad: [2, 5], csg_fraction: 0.92, hubs: 4, well_rate: [12, 38],  co2_molpct: [0.2, 2.5], h2s_ppm: [0, 2],   td_m: [500, 1300]}
+  - {name: Cooper-Eromanga, state: SA/QLD, reservoir: Patchawarra Formation,   lat: -27.95, lon: 140.45, spread: 0.70, pads: 20, wells_per_pad: [1, 3], csg_fraction: 0.0,  hubs: 3, well_rate: [8, 30],   co2_molpct: [8, 22],    h2s_ppm: [0, 20],  td_m: [2200, 3400]}
+  - {name: Perth,           state: WA,     reservoir: Kingia Sandstone,        lat: -29.30, lon: 115.15, spread: 0.22, pads: 5,  wells_per_pad: [1, 3], csg_fraction: 0.0,  hubs: 1, well_rate: [30, 75], co2_molpct: [1, 6],     h2s_ppm: [0, 10],  td_m: [2800, 4200]}
+  - {name: Amadeus,         state: NT,     reservoir: Pacoota Sandstone,       lat: -23.97, lon: 131.70, spread: 0.30, pads: 3,  wells_per_pad: [1, 2], csg_fraction: 0.0,  hubs: 1, well_rate: [10, 35],  co2_molpct: [1, 5],     h2s_ppm: [0, 10],  td_m: [1500, 2500]}
+  - {name: Carnarvon,       state: WA,     reservoir: Mungaroo Formation,      lat: -19.90, lon: 115.30, offshore: true, pads: 7, wells_per_pad: [4, 8], csg_fraction: 0.0, hubs: 2, well_rate: [380, 820], co2_molpct: [2, 14], h2s_ppm: [0, 15], td_m: [2800, 4800],
+     locations: [[-19.59, 116.14], [-19.68, 115.94], [-19.52, 116.55], [-19.72, 115.10], [-20.10, 114.70], [-20.40, 114.25], [-19.85, 114.55]]}
+  - {name: Browse,          state: WA,     reservoir: Plover Formation,        lat: -13.85, lon: 123.30, offshore: true, pads: 2, wells_per_pad: [5, 8], csg_fraction: 0.0, hubs: 1, well_rate: [280, 560], co2_molpct: [6, 12], h2s_ppm: [0, 10], td_m: [3800, 5200],
+     locations: [[-13.92, 123.28], [-13.78, 123.36]]}
+  - {name: Bonaparte,       state: NT,     reservoir: Elang Formation,         lat: -12.30, lon: 129.40, offshore: true, pads: 2, wells_per_pad: [3, 5], csg_fraction: 0.0, hubs: 1, well_rate: [140, 320], co2_molpct: [2, 10], h2s_ppm: [0, 10], td_m: [2600, 4000],
+     locations: [[-13.95, 128.55], [-10.35, 130.05]]}
+  - {name: Gippsland,       state: VIC,    reservoir: Latrobe Group,           lat: -38.30, lon: 148.05, offshore: true, pads: 4, wells_per_pad: [4, 8], csg_fraction: 0.0, hubs: 1, well_rate: [35, 95], co2_molpct: [1, 3], h2s_ppm: [0, 5], td_m: [1600, 2800],
+     locations: [[-38.30, 147.67], [-38.23, 148.22], [-38.20, 148.00], [-38.22, 148.58]]}
+  - {name: Otway,           state: VIC,    reservoir: Waarre Formation,        lat: -38.95, lon: 142.45, offshore: true, pads: 2, wells_per_pad: [2, 4], csg_fraction: 0.0, hubs: 1, well_rate: [45, 120], co2_molpct: [1, 8], h2s_ppm: [0, 5], td_m: [1800, 3200],
+     locations: [[-39.15, 142.15], [-38.82, 142.72]]}
+
 wellpads:
-  count: 50               # BAR001 .. BAR050, a large-operator footprint (large Australian CSG operator scale)
-  prefix: BAR
-  wells_total: 500        # ~500 producing wells distributed across the pads, spread over the 9 AU basins
-  # a realistic CSG/conventional blend
-  csg_fraction: 0.6       # 60% CSG (ESP-dewatered) wells, 40% conventional
-  gas_lift_fraction: 0.25 # of conventional wells, share on gas lift
+  prefix: BAR              # onshore pads BAR001.. (offshore platforms PLT001..)
+  gas_lift_fraction: 0.25  # of onshore conventional wells, share on gas lift (offshore gas wells flow naturally)
 
 gathering:
-  area: GTH001            # base/prefix; the generator expands to GTH001..GTH0{hubs}
-  hubs: 12                # 12 gathering hubs / compression satellites across the basins (one map bubble each)
-  segments: 48            # gathering-line segments distributed across the hubs
+  segments_per_hub: [3, 6] # gathering-line / flowline segments per hub (seeded)
 
 cpf:
-  # two Central Processing Facilities, five parallel trains in total (CPF001-002 = CPF-A, CPF003-005 = CPF-B)
+  # thirteen gas plants, each at its real town and in the basin whose gas it processes. units = the process
+  # units the plant carries besides inlet separation and compression: CSG is dry, near-pure methane, so a
+  # CSG plant only dehydrates; conventional and offshore gas needs CO2 removal (AMN) and condensate/NGL recovery.
+  compressors_per_train: 3   # default
   trains:
-    - {area: CPF001, name: Train 1}
-    - {area: CPF002, name: Train 2}
-    - {area: CPF003, name: Train 3}
-    - {area: CPF004, name: Train 4}
-    - {area: CPF005, name: Train 5}
-  compressors_per_train: 3   # 15 units total
-  has_teg: true
-  has_amine: true
-  has_ngl: true
-  has_utilities: true
-  has_flare: true
+    - {area: CPF001, name: Surat gas plant 1,      place: Miles,         basin: Surat,           lat: -26.66, lon: 150.18, compressors: 4, units: [DEH, UTL, FLR]}
+    - {area: CPF002, name: Moomba gas plant,       place: Moomba,        basin: Cooper-Eromanga, lat: -28.11, lon: 140.21, compressors: 4, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF003, name: Surat gas plant 2,      place: Chinchilla,    basin: Surat,           lat: -26.74, lon: 150.63, compressors: 4, units: [DEH, UTL, FLR]}
+    - {area: CPF004, name: Surat gas plant 3,      place: Tara,          basin: Surat,           lat: -27.28, lon: 150.46, compressors: 3, units: [DEH, UTL, FLR]}
+    - {area: CPF005, name: Bowen gas plant,        place: Injune,        basin: Bowen,           lat: -25.84, lon: 148.57, compressors: 3, units: [DEH, UTL, FLR]}
+    - {area: CPF006, name: Karratha gas plant,     place: Karratha,      basin: Carnarvon,       lat: -20.60, lon: 116.78, compressors: 5, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF007, name: Barrow Island gas plant, place: Barrow Island, basin: Carnarvon,      lat: -20.78, lon: 115.42, compressors: 4, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF008, name: Darwin gas plant,       place: Darwin,        basin: Browse,          lat: -12.53, lon: 130.88, compressors: 4, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF009, name: Wadeye gas plant,       place: Wadeye,        basin: Bonaparte,       lat: -14.24, lon: 129.52, compressors: 2, units: [DEH, NGL, UTL, FLR]}
+    - {area: CPF010, name: Longford gas plant,     place: Longford,      basin: Gippsland,       lat: -38.20, lon: 147.17, compressors: 3, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF011, name: Otway gas plant,        place: Port Campbell, basin: Otway,           lat: -38.56, lon: 142.86, compressors: 2, units: [DEH, AMN, NGL, UTL, FLR]}
+    - {area: CPF012, name: Dongara gas plant,      place: Dongara,       basin: Perth,           lat: -29.40, lon: 115.12, compressors: 2, units: [DEH, AMN, UTL, FLR]}
+    - {area: CPF013, name: Mereenie gas plant,     place: Mereenie,      basin: Amadeus,         lat: -23.95, lon: 131.47, compressors: 2, units: [DEH, UTL, FLR]}
 
 custody:
-  stations:
-    - {area: MET001, name: "Sales gas metering, pipeline export"}
-    - {area: MET002, name: "Sales gas metering, interconnect"}
-    - {area: MET003, name: "Sales gas metering, LNG feed"}
-    - {area: MET004, name: "Sales gas metering, WA domestic pipeline"}   # WA gas cannot reach the east-coast grid
+  stations:   # at the real export and delivery points
+    - {area: MET001, name: "Sales gas metering, pipeline export", place: "Wallumbilla hub", basin: Surat,           lat: -26.58, lon: 149.19}
+    - {area: MET002, name: "Sales gas metering, interconnect",     place: "Moomba",          basin: Cooper-Eromanga, lat: -28.12, lon: 140.19}
+    - {area: MET003, name: "Sales gas metering, LNG feed",         place: "Gladstone",       basin: Bowen,           lat: -23.80, lon: 151.18}
+    - {area: MET004, name: "Sales gas metering, LNG export",       place: "Burrup Peninsula", basin: Carnarvon,      lat: -20.58, lon: 116.80}
+    - {area: MET005, name: "Sales gas metering, LNG export",       place: "Barrow Island",   basin: Carnarvon,       lat: -20.80, lon: 115.44}
+    - {area: MET006, name: "Sales gas metering, domestic pipeline", place: "Dampier",        basin: Carnarvon,       lat: -20.66, lon: 116.71}
+    - {area: MET007, name: "Sales gas metering, pipeline export", place: "Longford",         basin: Gippsland,       lat: -38.22, lon: 147.15}
+    - {area: MET008, name: "Sales gas metering, Iona hub",         place: "Port Campbell",   basin: Otway,           lat: -38.55, lon: 142.92}
+    - {area: MET009, name: "Sales gas metering, LNG export",       place: "Darwin",          basin: Browse,          lat: -12.50, lon: 130.92}
+    - {area: MET010, name: "Sales gas metering, domestic pipeline", place: "Wadeye",         basin: Bonaparte,       lat: -14.22, lon: 129.55}
+    - {area: MET011, name: "Sales gas metering, domestic pipeline", place: "Dongara",        basin: Perth,           lat: -29.25, lon: 114.94}
+    - {area: MET012, name: "Sales gas metering, domestic pipeline", place: "Alice Springs",  basin: Amadeus,         lat: -23.74, lon: 133.86}
 
 # ---------------------------------------------------------------------------------------------
 # Supply network (the physical gas path, for impact analysis). Pads feed the gathering hub(s) in their
-# basin; hubs feed the processing train in their basin, or the nearest train when their basin has none.
-# Each train's sales gas splits across custody meters by these shares (they sum to 1 per train).
+# basin; hubs feed the processing plant in their basin. Each plant's sales gas splits across custody
+# meters by these shares (they sum to 1 per plant).
 # ---------------------------------------------------------------------------------------------
 network:
   processing_shrink: 0.03    # fuel gas + CO2/inert removal between the wellhead and the sales meter
   train_custody:
-    CPF001: {MET001: 0.6, MET003: 0.4}   # Surat: domestic pipeline export + Gladstone LNG feed
-    CPF002: {MET002: 0.7, MET001: 0.3}   # Cooper: Moomba interconnect + backhaul north to Wallumbilla
-    CPF003: {MET003: 1.0}                # Bowen: LNG feed
-    CPF004: {MET004: 1.0}                # Carnarvon: WA domestic pipeline
-    CPF005: {MET004: 1.0}                # Perth Basin: WA domestic pipeline
+    CPF001: {MET001: 0.6, MET003: 0.4}    # Surat: domestic pipeline export + Gladstone LNG feed
+    CPF002: {MET002: 0.85, MET001: 0.15}  # Cooper: Moomba interconnect + backhaul north to Wallumbilla
+    CPF003: {MET003: 1.0}                 # Surat: LNG feed
+    CPF004: {MET001: 0.5, MET003: 0.5}    # Surat: split between domestic export and LNG feed
+    CPF005: {MET003: 1.0}                 # Bowen: LNG feed
+    CPF006: {MET004: 0.85, MET006: 0.15}  # Karratha: LNG export + WA domestic gas reservation
+    CPF007: {MET005: 0.88, MET006: 0.12}  # Barrow Island: LNG export + WA domestic gas
+    CPF008: {MET009: 1.0}                 # Darwin: LNG export
+    CPF009: {MET010: 1.0}                 # Wadeye: NT domestic gas
+    CPF010: {MET007: 1.0}                 # Longford: Melbourne and the east coast
+    CPF011: {MET008: 1.0}                 # Otway: Iona hub (Victoria and South Australia)
+    CPF012: {MET011: 1.0}                 # Dongara: WA Mid West domestic gas
+    CPF013: {MET012: 1.0}                 # Mereenie: Alice Springs and the Northern Gas Pipeline
 
 # ---------------------------------------------------------------------------------------------
 # Customers the gas is custody-transferred to. ALL NAMES ARE FICTIONAL. weight = share of the delivery
@@ -135,34 +180,47 @@ network:
 # floats with the daily market price (spot). priority 1 = firm (curtailed last), 3 = spot (first).
 # ---------------------------------------------------------------------------------------------
 customers:
-  - {name: Brisbane Basin Energy Retail,    segment: Retail,          location: "Brisbane, QLD",      delivery_point: MET001, contract: Firm GSA,      weight: 0.22, price_gj: 11.20, priority: 1}
-  - {name: Condamine Plains Power,          segment: Power generation, location: "Chinchilla, QLD",   delivery_point: MET001, contract: Firm GSA,      weight: 0.18, price_gj: 10.60, priority: 1}
-  - {name: Moreton Bay Fertilisers,         segment: Industrial,      location: "Brisbane, QLD",      delivery_point: MET001, contract: Firm GSA,      weight: 0.12, price_gj: 10.10, priority: 1}
-  - {name: Sunshine Coast Gas Distribution, segment: Distribution,    location: "Maroochydore, QLD",  delivery_point: MET001, contract: Firm GSA,      weight: 0.10, price_gj: 11.50, priority: 1}
-  - {name: Hunter Coast Aluminium,          segment: Industrial,      location: "Newcastle, NSW",     delivery_point: MET001, contract: Firm GSA,      weight: 0.14, price_gj: 10.40, priority: 1}
-  - {name: Sydney Harbour Energy Retail,    segment: Retail,          location: "Sydney, NSW",        delivery_point: MET001, contract: Interruptible, weight: 0.14, price_gj: 11.80, priority: 2}
-  - {name: Wallumbilla hub short-term trades, segment: Spot market,   location: "Wallumbilla, QLD",   delivery_point: MET001, contract: Spot,          weight: 0.10, price_gj: null,  priority: 3}
-  - {name: Adelaide Plains Power,           segment: Power generation, location: "Adelaide, SA",      delivery_point: MET002, contract: Firm GSA,      weight: 0.20, price_gj: 11.00, priority: 1}
-  - {name: Spencer Gulf Smelting,           segment: Industrial,      location: "Whyalla, SA",        delivery_point: MET002, contract: Firm GSA,      weight: 0.12, price_gj: 10.30, priority: 1}
-  - {name: Southern Cross Energy,           segment: Retail,          location: "Adelaide, SA",       delivery_point: MET002, contract: Firm GSA,      weight: 0.20, price_gj: 11.40, priority: 1}
-  - {name: Tasman Industrial Gas,           segment: Industrial,      location: "Geelong, VIC",       delivery_point: MET002, contract: Firm GSA,      weight: 0.15, price_gj: 10.80, priority: 1}
-  - {name: Murray Basin Glassworks,         segment: Manufacturing,   location: "Mildura, VIC",       delivery_point: MET002, contract: Interruptible, weight: 0.08, price_gj: 11.10, priority: 2}
-  - {name: Melbourne Metro Gas Retail,      segment: Retail,          location: "Melbourne, VIC",     delivery_point: MET002, contract: Firm GSA,      weight: 0.17, price_gj: 11.60, priority: 1}
-  - {name: Victorian wholesale market sales, segment: Spot market,    location: "Melbourne, VIC",     delivery_point: MET002, contract: Spot,          weight: 0.08, price_gj: null,  priority: 3}
-  - {name: Meridian LNG Trading,            segment: LNG portfolio,   location: "Gladstone, QLD",     delivery_point: MET003, contract: LNG SPA,       weight: 0.25, price_gj: 13.40, priority: 1}
-  - {name: Seto Bay Utilities,              segment: LNG export,      location: "Osaka, Japan",       delivery_point: MET003, contract: LNG SPA,       weight: 0.22, price_gj: 14.10, priority: 1}
-  - {name: Seoul Bay City Gas,              segment: LNG export,      location: "Incheon, South Korea", delivery_point: MET003, contract: LNG SPA,     weight: 0.18, price_gj: 13.90, priority: 1}
-  - {name: Pearl Delta Energy,              segment: LNG export,      location: "Guangzhou, China",   delivery_point: MET003, contract: LNG SPA,       weight: 0.18, price_gj: 13.60, priority: 1}
-  - {name: Straits Energy Trading,          segment: LNG export,      location: "Singapore",          delivery_point: MET003, contract: LNG SPA,       weight: 0.06, price_gj: 14.30, priority: 1}
-  - {name: Curtis Island Domestic Offtake,  segment: Industrial,      location: "Gladstone, QLD",     delivery_point: MET003, contract: Firm GSA,      weight: 0.07, price_gj: 10.90, priority: 1}
-  - {name: LNG spot cargoes,                segment: Spot market,     location: "Gladstone, QLD",     delivery_point: MET003, contract: Spot,          weight: 0.04, price_gj: null,  priority: 3}
-  - {name: Coral Coast Gas Retail,          segment: Retail,          location: "Perth, WA",          delivery_point: MET004, contract: Firm GSA,      weight: 0.20, price_gj: 9.40,  priority: 1}
-  - {name: Red Range Iron Ore,              segment: Mining,          location: "Karratha, WA",       delivery_point: MET004, contract: Firm GSA,      weight: 0.20, price_gj: 8.90,  priority: 1}
-  - {name: Peel Coast Alumina,              segment: Industrial,      location: "Mandurah, WA",       delivery_point: MET004, contract: Firm GSA,      weight: 0.14, price_gj: 8.70,  priority: 1}
-  - {name: Outback Power Co,                segment: Power generation, location: "Port Hedland, WA",  delivery_point: MET004, contract: Firm GSA,      weight: 0.17, price_gj: 9.10,  priority: 1}
-  - {name: Eastern Goldfields Nickel,       segment: Mining,          location: "Kalgoorlie, WA",     delivery_point: MET004, contract: Interruptible, weight: 0.12, price_gj: 9.60,  priority: 2}
-  - {name: Perth Metro Gas Distribution,    segment: Distribution,    location: "Perth, WA",          delivery_point: MET004, contract: Firm GSA,      weight: 0.13, price_gj: 9.80,  priority: 1}
-  - {name: WA short-term trades,            segment: Spot market,     location: "Perth, WA",          delivery_point: MET004, contract: Spot,          weight: 0.04, price_gj: null,  priority: 3}
+  - {name: Brisbane Basin Energy Retail, segment: Retail, location: "Brisbane, QLD", delivery_point: MET001, contract: Firm GSA, weight: 0.45, price_gj: 11.20, priority: 1}
+  - {name: Condamine Plains Power, segment: Power generation, location: "Chinchilla, QLD", delivery_point: MET001, contract: Firm GSA, weight: 0.35, price_gj: 10.60, priority: 1}
+  - {name: Wallumbilla hub short-term trades, segment: Spot market, location: "Wallumbilla, QLD", delivery_point: MET001, contract: Spot, weight: 0.20, price_gj: null, priority: 3}
+  - {name: Adelaide Plains Power, segment: Power generation, location: "Adelaide, SA", delivery_point: MET002, contract: Firm GSA, weight: 0.75, price_gj: 11.00, priority: 1}
+  - {name: Adelaide spot trades, segment: Spot market, location: "Adelaide, SA", delivery_point: MET002, contract: Spot, weight: 0.25, price_gj: null, priority: 3}
+  - {name: Meridian LNG Trading, segment: LNG portfolio, location: "Gladstone, QLD", delivery_point: MET003, contract: LNG SPA, weight: 0.45, price_gj: 13.40, priority: 1}
+  - {name: Seto Bay Utilities, segment: LNG export, location: "Osaka, Japan", delivery_point: MET003, contract: LNG SPA, weight: 0.35, price_gj: 14.10, priority: 1}
+  - {name: LNG spot cargoes, segment: Spot market, location: "Gladstone, QLD", delivery_point: MET003, contract: Spot, weight: 0.20, price_gj: null, priority: 3}
+  - {name: Kanto Plains Power, segment: LNG export, location: "Tokyo, Japan", delivery_point: MET004, contract: LNG SPA, weight: 0.50, price_gj: 13.80, priority: 1}
+  - {name: Han River Energy, segment: LNG export, location: "Seoul, South Korea", delivery_point: MET004, contract: LNG SPA, weight: 0.35, price_gj: 13.90, priority: 1}
+  - {name: Pilbara LNG spot cargoes, segment: Spot market, location: "Karratha, WA", delivery_point: MET004, contract: Spot, weight: 0.15, price_gj: null, priority: 3}
+  - {name: Chubu Coast Energy, segment: LNG export, location: "Nagoya, Japan", delivery_point: MET005, contract: LNG SPA, weight: 0.55, price_gj: 13.60, priority: 1}
+  - {name: Bohai Bay Gas, segment: LNG export, location: "Tianjin, China", delivery_point: MET005, contract: LNG SPA, weight: 0.30, price_gj: 13.40, priority: 1}
+  - {name: Barrow LNG spot cargoes, segment: Spot market, location: "Barrow Island, WA", delivery_point: MET005, contract: Spot, weight: 0.15, price_gj: null, priority: 3}
+  - {name: Kwinana Alumina Refining, segment: Industrial, location: "Kwinana, WA", delivery_point: MET006, contract: Firm GSA, weight: 0.55, price_gj: 8.40, priority: 1}
+  - {name: Perth Metro Gas Retail, segment: Retail, location: "Perth, WA", delivery_point: MET006, contract: Firm GSA, weight: 0.30, price_gj: 8.90, priority: 1}
+  - {name: WA domestic spot trades, segment: Spot market, location: "Perth, WA", delivery_point: MET006, contract: Spot, weight: 0.15, price_gj: null, priority: 3}
+  - {name: Melbourne Metro Gas Retail, segment: Retail, location: "Melbourne, VIC", delivery_point: MET007, contract: Firm GSA, weight: 0.55, price_gj: 11.60, priority: 1}
+  - {name: Tasman Industrial Gas, segment: Industrial, location: "Geelong, VIC", delivery_point: MET007, contract: Firm GSA, weight: 0.30, price_gj: 10.80, priority: 1}
+  - {name: Victorian wholesale market sales, segment: Spot market, location: "Melbourne, VIC", delivery_point: MET007, contract: Spot, weight: 0.15, price_gj: null, priority: 3}
+  - {name: Discovery Bay Aluminium, segment: Industrial, location: "Portland, VIC", delivery_point: MET008, contract: Firm GSA, weight: 0.75, price_gj: 10.50, priority: 1}
+  - {name: Iona hub spot trades, segment: Spot market, location: "Port Campbell, VIC", delivery_point: MET008, contract: Spot, weight: 0.25, price_gj: null, priority: 3}
+  - {name: Tohoku Coast Energy, segment: LNG export, location: "Sendai, Japan", delivery_point: MET009, contract: LNG SPA, weight: 0.55, price_gj: 13.70, priority: 1}
+  - {name: Kansai Bay Power, segment: LNG export, location: "Kobe, Japan", delivery_point: MET009, contract: LNG SPA, weight: 0.30, price_gj: 13.80, priority: 1}
+  - {name: Darwin LNG spot cargoes, segment: Spot market, location: "Darwin, NT", delivery_point: MET009, contract: Spot, weight: 0.15, price_gj: null, priority: 3}
+  - {name: Territory Power Generation, segment: Power generation, location: "Darwin, NT", delivery_point: MET010, contract: Firm GSA, weight: 0.80, price_gj: 9.40, priority: 1}
+  - {name: Top End spot trades, segment: Spot market, location: "Darwin, NT", delivery_point: MET010, contract: Spot, weight: 0.20, price_gj: null, priority: 3}
+  - {name: Perth Hills Gas Retail, segment: Retail, location: "Perth, WA", delivery_point: MET011, contract: Firm GSA, weight: 0.80, price_gj: 8.90, priority: 1}
+  - {name: Mid West spot trades, segment: Spot market, location: "Dongara, WA", delivery_point: MET011, contract: Spot, weight: 0.20, price_gj: null, priority: 3}
+  - {name: Red Centre Power, segment: Power generation, location: "Alice Springs, NT", delivery_point: MET012, contract: Firm GSA, weight: 0.80, price_gj: 9.90, priority: 1}
+  - {name: Central Australia spot trades, segment: Spot market, location: "Alice Springs, NT", delivery_point: MET012, contract: Spot, weight: 0.20, price_gj: null, priority: 3}
+
+# ---------------------------------------------------------------------------------------------
+# Site condition (the 3D site colours and the map pins). Each site is drawn healthy, needing attention or
+# critical with these odds (seeded), and its work orders, trips and equipment wear follow: a healthy site has
+# no open work orders, a site needing attention has a few open routine ones (amber), and a critical site
+# carries an open P1 (red). The scenario story sites are pinned so the storylines stay intact.
+# ---------------------------------------------------------------------------------------------
+site_condition:
+  odds: {green: 0.72, amber: 0.19, red: 0.09}
+  pinned: {CPF002: red, BAR005: red, BAR003: amber, BAR007: amber, CPF001: amber, MET002: amber}
 
 # ---------------------------------------------------------------------------------------------
 # 3D scenes (Design 2.13 / 3.1): one navigable scene per value-chain stop. hotspot key == tag_id.

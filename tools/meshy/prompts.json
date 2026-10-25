@@ -1,0 +1,219 @@
+{
+ "style": "Stylized 3D game asset in a graphic-novel comic style: hand-painted textures with ink line work and light crosshatching in the shadows, bold dark outlines along edges, slightly chunky exaggerated proportions, weathered worn surfaces with dust and grime, rich earthy colours. Real-world scale, single object on flat ground, no base plate, no text, no letters, no logos.",
+ "assets": {
+  "compressor": {
+   "polycount": 30000,
+   "prompt": "Natural gas reciprocating compressor package on a steel skid: large gas engine driver, crankcase with four horizontal cylinders, yellow suction and discharge scrubber vessels, cooler with big fans on top, interconnecting pipes with red valve handwheels, walkway handrails, small control panel. About 12 m long.",
+   "concept": "a natural gas compressor package on an industrial steel skid, about 12 m long: a large gas engine driving a reciprocating compressor with four prominent horizontal cylinders and big bolted cylinder heads, two tall safety-yellow vertical scrubber vessels with domed tops, a large air cooler on top with three big round fans, chunky blue-grey process pipes with flanges and red valve handwheels, galvanised walkway handrails and a small control panel. Colours: safety yellow vessels, blue-grey skid and pipes, red handwheels, weathered off-white engine enclosure.",
+   "kind": "equipment"
+  },
+  "wellhead": {
+   "kind": "equipment",
+   "polycount": 15000,
+   "concept": "Gas wellhead christmas tree about 3 m tall on a gravel well pad: stacked master valves with big red handwheels, a cross fitting, a choke valve, a flowline leaving sideways, pressure gauges and bolted flanges, inside a low galvanised safety fence. Colours: red handwheels, blue-grey valve bodies, galvanised fence.",
+   "prompt": "Gas wellhead christmas tree about 3 m tall on a gravel well pad: stacked master valves with big red handwheels, a cross fitting, a choke valve, a flowline leaving sideways, pressure gauges and bolted flanges, inside a low galvanised safety fence. Colours: red handwheels, blue-grey valve bodies, galvanised fence."
+  },
+  "esp": {
+   "kind": "equipment",
+   "polycount": 15000,
+   "concept": "Electric submersible pump surface package at a gas well: a weatherproof variable speed drive cabinet with cooling vents, a transformer box and a junction box on a steel skid under a small sunshade roof, an armoured cable running to a short wellhead. Colours: safety-orange cabinet, blue-grey skid, galvanised roof.",
+   "prompt": "Electric submersible pump surface package at a gas well: a weatherproof variable speed drive cabinet with cooling vents, a transformer box and a junction box on a steel skid under a small sunshade roof, an armoured cable running to a short wellhead. Colours: safety-orange cabinet, blue-grey skid, galvanised roof."
+  },
+  "gas_lift": {
+   "kind": "equipment",
+   "polycount": 12000,
+   "concept": "Compact gas lift injection skid: a short pipe spool with an orifice flowmeter, a control valve with a round actuator on top, a check valve and pressure gauges, on a small steel skid. Colours: blue-grey pipes, yellow actuator, red handwheel.",
+   "prompt": "Compact gas lift injection skid: a short pipe spool with an orifice flowmeter, a control valve with a round actuator on top, a check valve and pressure gauges, on a small steel skid. Colours: blue-grey pipes, yellow actuator, red handwheel."
+  },
+  "gathering": {
+   "kind": "equipment",
+   "polycount": 12000,
+   "concept": "Above-ground gas gathering pipeline section on low steel supports: a pig launcher barrel with a round hinged closure door, isolation valves with handwheels, a pressure gauge and a yellow pipeline marker post. Colours: blue-grey pipe, red handwheels, yellow marker.",
+   "prompt": "Above-ground gas gathering pipeline section on low steel supports: a pig launcher barrel with a round hinged closure door, isolation valves with handwheels, a pressure gauge and a yellow pipeline marker post. Colours: blue-grey pipe, red handwheels, yellow marker."
+  },
+  "separator": {
+   "kind": "equipment",
+   "polycount": 30000,
+   "concept": "Horizontal three-phase production separator: a large white pressure vessel with domed ends on steel saddles, nozzles on top, sight glasses on the side, a relief valve, inlet and outlet pipes with valves, an access ladder and a small platform. Colours: off-white vessel, blue-grey pipes, yellow ladder and handrails.",
+   "prompt": "Horizontal three-phase production separator: a large white pressure vessel with domed ends on steel saddles, nozzles on top, sight glasses on the side, a relief valve, inlet and outlet pipes with valves, an access ladder and a small platform. Colours: off-white vessel, blue-grey pipes, yellow ladder and handrails."
+  },
+  "teg": {
+   "kind": "equipment",
+   "polycount": 30000,
+   "concept": "Glycol dehydration unit: a tall slim contactor tower with ring platforms and a caged ladder, beside a horizontal reboiler with a small exhaust stack, glycol pumps and pipework on a skid. Colours: off-white tower, yellow cage and handrails, blue-grey pipes.",
+   "prompt": "Glycol dehydration unit: a tall slim contactor tower with ring platforms and a caged ladder, beside a horizontal reboiler with a small exhaust stack, glycol pumps and pipework on a skid. Colours: off-white tower, yellow cage and handrails, blue-grey pipes."
+  },
+  "amine": {
+   "kind": "equipment",
+   "polycount": 30000,
+   "concept": "Amine gas sweetening unit: two tall process columns (absorber and regenerator) with caged ladders and platforms, a reboiler, an air cooler with big fans and a short pipe rack between them. Colours: off-white columns, yellow cages, blue-grey pipes.",
+   "prompt": "Amine gas sweetening unit: two tall process columns (absorber and regenerator) with caged ladders and platforms, a reboiler, an air cooler with big fans and a short pipe rack between them. Colours: off-white columns, yellow cages, blue-grey pipes."
+  },
+  "ngl": {
+   "kind": "equipment",
+   "polycount": 30000,
+   "concept": "NGL stabiliser: a tall distillation column with ladders and ring platforms, a horizontal reflux drum and pumps at its base, a shell-and-tube heat exchanger and pipework, on a concrete footing. Colours: off-white column, yellow ladders, blue-grey pipes and drum.",
+   "prompt": "NGL stabiliser: a tall distillation column with ladders and ring platforms, a horizontal reflux drum and pumps at its base, a shell-and-tube heat exchanger and pipework, on a concrete footing. Colours: off-white column, yellow ladders, blue-grey pipes and drum."
+  },
+  "utilities": {
+   "kind": "equipment",
+   "polycount": 30000,
+   "concept": "Gas turbine generator set in a long acoustic enclosure with louvres and access doors, a tall exhaust stack, an air intake filter house on top, a cable tray and a small control room module beside it. Colours: sand-beige enclosure, dark exhaust stack, galvanised cable tray.",
+   "prompt": "Gas turbine generator set in a long acoustic enclosure with louvres and access doors, a tall exhaust stack, an air intake filter house on top, a cable tray and a small control room module beside it. Colours: sand-beige enclosure, dark exhaust stack, galvanised cable tray."
+  },
+  "flare": {
+   "kind": "equipment",
+   "polycount": 20000,
+   "concept": "Gas flare stack about 30 m tall: a slim steel stack with red and white bands held by guy wires, a heat-blackened flare tip with no flame, a horizontal knockout drum and an ignition panel at its base. Colours: red and white bands, off-white drum.",
+   "prompt": "Gas flare stack about 30 m tall: a slim steel stack with red and white bands held by guy wires, a heat-blackened flare tip with no flame, a horizontal knockout drum and an ignition panel at its base. Colours: red and white bands, off-white drum."
+  },
+  "fire_gas": {
+   "kind": "equipment",
+   "polycount": 6000,
+   "concept": "Fire and gas detection post: a steel pole with a yellow gas detector head, a flame detector, a red beacon light and a sounder, and a small junction box at its base. Colours: yellow detector, red beacon, galvanised pole.",
+   "prompt": "Fire and gas detection post: a steel pole with a yellow gas detector head, a flame detector, a red beacon light and a sounder, and a small junction box at its base. Colours: yellow detector, red beacon, galvanised pole."
+  },
+  "metering": {
+   "kind": "equipment",
+   "polycount": 20000,
+   "concept": "Custody transfer gas metering skid: two parallel ultrasonic meter runs with flow conditioners and isolation valves, a small analyser shelter and a flow computer cabinet, under a sunshade roof on a steel skid. Colours: blue-grey pipes, yellow meter bodies, white shelter.",
+   "prompt": "Custody transfer gas metering skid: two parallel ultrasonic meter runs with flow conditioners and isolation valves, a small analyser shelter and a flow computer cabinet, under a sunshade roof on a steel skid. Colours: blue-grey pipes, yellow meter bodies, white shelter."
+  },
+  "gum_tree": {
+   "kind": "surroundings",
+   "polycount": 8000,
+   "concept": "Australian eucalyptus gum tree about 10 m tall: a pale smooth twisting trunk with peeling bark and sparse drooping grey-green leaf clusters.",
+   "prompt": "Australian eucalyptus gum tree about 10 m tall: a pale smooth twisting trunk with peeling bark and sparse drooping grey-green leaf clusters."
+  },
+  "scrub": {
+   "kind": "surroundings",
+   "polycount": 5000,
+   "concept": "Low wide clump of spinifex grass and saltbush shrubs in dry straw and grey-green colours.",
+   "prompt": "Low wide clump of spinifex grass and saltbush shrubs in dry straw and grey-green colours."
+  },
+  "rocks": {
+   "kind": "surroundings",
+   "polycount": 5000,
+   "concept": "Cluster of weathered red sandstone boulders of different sizes.",
+   "prompt": "Cluster of weathered red sandstone boulders of different sizes."
+  },
+  "mesa": {
+   "kind": "surroundings",
+   "polycount": 4000,
+   "concept": "Low flat-topped red rock mesa hill with layered cliff sides, for a distant horizon, simple shapes.",
+   "prompt": "Low flat-topped red rock mesa hill with layered cliff sides, for a distant horizon, simple shapes."
+  },
+  "site_office": {
+   "kind": "surroundings",
+   "polycount": 12000,
+   "concept": "Portable site office cabin on skids with white cladding, a small porch with steps and a handrail, an air conditioner unit on the side and a solar panel on the roof.",
+   "prompt": "Portable site office cabin on skids with white cladding, a small porch with steps and a handrail, an air conditioner unit on the side and a solar panel on the roof."
+  },
+  "ute": {
+   "kind": "surroundings",
+   "polycount": 15000,
+   "concept": "Dusty white four-door work pickup truck with an orange beacon light bar and a roof rack, no brand badges.",
+   "prompt": "Dusty white four-door work pickup truck with an orange beacon light bar and a roof rack, no brand badges."
+  },
+  "pipe_rack": {
+   "kind": "surroundings",
+   "polycount": 15000,
+   "concept": "Steel pipe rack about 6 m tall and 12 m long with three levels of pipes and a cable tray.",
+   "prompt": "Steel pipe rack about 6 m tall and 12 m long with three levels of pipes and a cable tray."
+  },
+  "tanks": {
+   "kind": "surroundings",
+   "polycount": 15000,
+   "concept": "Pair of vertical steel storage tanks with spiral stairs inside a low concrete bund wall.",
+   "prompt": "Pair of vertical steel storage tanks with spiral stairs inside a low concrete bund wall."
+  },
+  "light_tower": {
+   "kind": "surroundings",
+   "polycount": 10000,
+   "concept": "Mobile lighting tower trailer with four floodlights on a telescopic mast and a small diesel generator.",
+   "prompt": "Mobile lighting tower trailer with four floodlights on a telescopic mast and a small diesel generator."
+  },
+  "windsock": {
+   "kind": "surroundings",
+   "polycount": 4000,
+   "concept": "Industrial orange and white striped windsock on a tall mast.",
+   "prompt": "A single industrial windsock on one tall steel mast: one orange and white striped fabric sock fully inflated by the wind, streaming straight out horizontally to one side from a ring at the top of the mast, a small square concrete footing. Only one mast and only one sock."
+  },
+  "fence": {
+   "kind": "surroundings",
+   "polycount": 3000,
+   "concept": "Section of galvanised chain-link security fence with posts, about 3 m long.",
+   "prompt": "Section of galvanised chain-link security fence with posts, about 3 m long."
+  },
+  "worker_1": {
+   "kind": "person",
+   "polycount": 20000,
+   "concept": "Gas field worker in orange hi-vis coveralls with reflective stripes, white hard hat and safety glasses, crouching on one knee and turning a large red valve handwheel with both hands, focused expression.",
+   "prompt": "Gas field worker in orange hi-vis coveralls with reflective stripes, white hard hat and safety glasses, crouching on one knee and turning a large red valve handwheel with both hands, focused expression."
+  },
+  "worker_2": {
+   "kind": "person",
+   "polycount": 20000,
+   "concept": "Gas field operator in a navy and hi-vis shirt and trousers and white hard hat, standing with weight on one leg, holding a handheld gas detector at chest height and looking at it.",
+   "prompt": "Gas field operator in a navy and hi-vis shirt and trousers and white hard hat, standing with weight on one leg, holding a handheld gas detector at chest height and looking at it."
+  },
+  "worker_3": {
+   "kind": "person",
+   "polycount": 20000,
+   "concept": "Site supervisor in a hi-vis vest over a work shirt and white hard hat, standing and pointing ahead with one arm while holding a tablet in the other hand.",
+   "prompt": "Site supervisor in a hi-vis vest over a work shirt and white hard hat, standing and pointing ahead with one arm while holding a tablet in the other hand."
+  },
+  "platform_jacket": {
+   "kind": "surroundings",
+   "prompt": "Offshore platform steel jacket substructure standing in calm sea: four tall tubular steel legs with diagonal X-bracing between them, yellow paint at the splash zone, a boat landing with a ladder on one leg, the legs end flat at the top with no deck and no topsides."
+  },
+  "deck_rail": {
+   "kind": "surroundings",
+   "prompt": "Section of offshore platform deck handrail about 3 m long: yellow-painted steel posts with two horizontal tubular rails and a low kick plate along the bottom."
+  },
+  "living_quarters": {
+   "kind": "surroundings",
+   "prompt": "Offshore platform accommodation module: a compact two-storey white steel living quarters block with small square windows, an external steel stair with handrails, an orange enclosed lifeboat hanging in davits on one side, and radio antennae on the roof."
+  },
+  "helideck": {
+   "kind": "surroundings",
+   "prompt": "Offshore helideck: an octagonal raised steel helicopter landing deck on a lattice support frame, a dark green deck surface with a painted yellow landing circle, safety netting around the edge and a small windsock."
+  },
+  "pedestal_crane": {
+   "kind": "surroundings",
+   "prompt": "Offshore pedestal crane: a tall cylindrical steel pedestal with an operator cab and a long lattice boom raised at about 45 degrees, a hook block hanging on its cable, yellow and white paint."
+  },
+  "deck_containers": {
+   "kind": "surroundings",
+   "prompt": "Cluster of offshore cargo baskets and containers on a steel deck: two stacked shipping containers, an open cargo basket with pipes, and a row of gas cylinders in a rack."
+  },
+  "supply_vessel": {
+   "kind": "surroundings",
+   "prompt": "Offshore platform supply vessel about 70 m long floating at sea: a tall forward superstructure with a wide bridge, a long flat open cargo deck at the stern carrying containers and pipes, orange and white hull."
+  },
+  "crew_boat": {
+   "kind": "surroundings",
+   "prompt": "Fast crew transfer catamaran about 20 m long floating at sea: twin slender hulls, a white wheelhouse cabin with wraparound windows, a thick black rubber fender on the bow, a small mast with lights."
+  },
+  "buoy": {
+   "kind": "surroundings",
+   "prompt": "Navigation marker buoy floating at sea: a yellow cylindrical float with a cross-shaped top mark on a short lattice tower and a small lantern."
+  },
+  "lng_carrier": {
+   "kind": "surroundings",
+   "prompt": "LNG carrier ship with four large spherical cargo tanks along its deck and a superstructure at the stern, for a distant horizon, simple shapes."
+  },
+  "distant_platform": {
+   "kind": "surroundings",
+   "prompt": "Offshore gas production platform with stacked topsides modules, a flare boom and a helideck on a steel jacket standing in the sea, for a distant horizon, simple shapes."
+  },
+  "whale_tail": {
+   "kind": "surroundings",
+   "prompt": "Humpback whale tail fluke rising out of calm sea water with water splashing and dripping off it."
+  },
+  "seagull": {
+   "kind": "surroundings",
+   "prompt": "A single seagull in flight with wings spread wide, white body with grey wings and black wing tips."
+  }
+ }
+}

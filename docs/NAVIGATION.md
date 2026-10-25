@@ -1,9 +1,9 @@
 # Navigating the app
 
 A guided tour of the Gas Upstream Digital Twin app ("Databricks Asset Atlas"). The left menu has
-six items: **Command Centre, Assets map, Gas flow chain, Analytics, Recommendation Inbox, Asset &
-Document Explorer**. The highlighted item always has the content area pointing back at it like a
-speech bubble.
+five icons: **Command Centre, Gas flow chain, Analytics, Recommendation Inbox, Asset & Document
+Explorer** (hover an icon to see its name). The highlighted item always has the content area pointing
+back at it like a speech bubble.
 
 ## Three ways to read it
 
@@ -52,8 +52,14 @@ speech bubble.
      **bottleneck** (the single asset putting the most production at risk), then two icons: the
      **Field Map** and **Impact analysis**.
    - The value chain as five pictures (Reservoir, Wells, Gathering, Processing, Custody). The stop
-     under the most pressure is red with its production at risk; the next is amber. A picture grows
-     when you hover it; click it to open that stop in the Gas flow chain.
+     under the most pressure is red with its production at risk; the one to watch (the next most at
+     risk) is amber, also with its production at risk. Hover a picture for what its colour means.
+   - **Click anything red or amber** (a stop, the bottleneck, or the difference from commitment when
+     it is below): the screen where the cause lives opens with a banner saying why, and the cause
+     coloured to match: its table rows (moved to the top), chart bars, chart lines and KPI tiles.
+     For example, amber Wells opens Reservoirs & Wells with the liquid-loading wells highlighted;
+     red Processing opens Compression Health with the failing compressors highlighted. The banner's
+     x clears the highlight.
    - **Production against commitment:**\
      Actual vs nominated over the last two months, with any
      shortfall shaded.
@@ -75,32 +81,34 @@ speech bubble.
    - Click empty space or **Clear** to reset.
 
 3. **Field Map** (the map icon on the Command Centre's top tile):\
-   Every site (well pad, gathering
-   network, processing train, custody meter) across the Australian gas basins. Group bubbles count
+   Every site (well pad, offshore platform, gathering hub, offshore manifold, gas plant, custody meter)
+   across the operator's ten basins, onshore and offshore, all over Australia. Group bubbles count
    **sites**; a single site's bubble takes the colour of its worst asset (red, amber or green). Hover a
    site for its name, its assets (red, amber, healthy) and production at risk; click it to open the
    **Site view**.
 
 4. **Site view** (opened from the Field Map, from **View site** in an asset's detail, or from the
    Command Centre's red assets tile):\
-   The site's equipment with a floating tag over each asset.
-   - The left list shows every value-chain stop (site) and its asset count; click one to switch sites.
-   - Drag to rotate, scroll to zoom. Hover an asset for a quick tooltip.
+   The site's equipment with a floating tag over each asset, in a hand-painted graphic-novel style.
+   - Onshore sites stand on a fenced gravel pad in the outback; the site ute is painted in the site's
+     status colour. Offshore platforms and manifolds stand on a steel deck over a soft blue sea, with a
+     crew boat (in the site's status colour), a supply vessel, buoys, gulls, a passing whale and other
+     platforms on the horizon.
+   - The left list groups the sites (well pads, offshore platforms, gathering hubs, offshore
+     manifolds, gas plants, custody) with each site's place underneath; click a heading to fold it,
+     click a site to switch to it.
+   - Drag to rotate, scroll to zoom. Click an asset and the site engineer runs to it and says what he
+     makes of it.
    - Click an asset or its tag: the full asset detail slides in from the right. Click empty ground (or
      the x) to slide it away.
 
-5. **Assets map:**\
-   Every asset (wellhead, gathering line, compressor, separator, meter and plant
-   unit) on the Australia map, one typed marker each (W well, G gathering, P processing, C compression,
-   M custody). Group bubbles count **assets**; pumps and gas lift sit on their wellhead, so each well is
-   one marker. Click an asset to open its detail.
-
-6. **Gas flow chain:**\
+5. **Gas flow chain:**\
    The five value-chain stops as folder tabs:
    - *Reservoirs & Wells:*\
      Producing / CSG wells, utilisation, liquid-loading watch and SSSV status;
-     the reservoir pressure trend; gas produced by each well (shaded against the average); wells by
-     utilisation; and the liquid-loading watchlist ranked by risk.
+     wellhead pressure by basin as % of its starting level (the drift is depletion, the spikes are
+     shut-ins building up during plant turnarounds); the average rate per well by basin; wells by
+     utilisation; and the liquid-loading watchlist ranked by risk, its watch wells tinted amber.
    - *Gathering & Flow Assurance:*\
      Segments on hydrate watch, the minimum hydrate margin, pig runs
      due and line pressure; the worst-case hydrate margin by segment; and every segment's line
@@ -115,7 +123,7 @@ speech bubble.
      The worst unaccounted-for gas (UAF), metering stations, the UAF
      trend and the custody reconciliation.
 
-7. **Analytics:**\
+6. **Analytics:**\
    Every cross-cutting report as a folder tab (each opens with the data period it
    covers):
    - *Integrity & RBI:*\
@@ -170,18 +178,19 @@ speech bubble.
      Projects, capex and expected uplift; capex by area; the
      development and capital schedule with payback.
 
-8. **Recommendation Inbox:**\
+7. **Recommendation Inbox:**\
    Prescriptive recommendations with their cross-domain evidence and the
    asset's open work orders (linked). **Accept / Reject / Annotate** is written back and audited to
    Lakebase; once decided, the card shows an **Undo** instead.
 
-9. **Asset & Document Explorer:**\
+8. **Asset & Document Explorer:**\
    The semantic backbone, made tangible. Tiles count the tags, assets
    and functional locations. On the **left**, type a tag, asset, area or signal and it resolves end to
    end: the decoded tag key, the asset (a link to its detail), the functional location, the latest
    sensor reading with its normal operating range, and its ids in every other system (PI historian,
-   EAM, OSDU, P&ID). On the **right**, browse the physical-location tree (field to area to asset to
-   tag); click an asset for its detail, click a tag to resolve it on the left.
+   EAM, OSDU, P&ID). On the **right**, browse the physical-location tree (field to basin to site to
+   asset to tag): each basin opens to its sites along the gas path; click an asset for its detail,
+   click a tag to resolve it on the left.
 
 ## Also deployed
 

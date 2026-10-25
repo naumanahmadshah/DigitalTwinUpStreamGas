@@ -19,6 +19,16 @@ SCHEMA = spark.conf.get("twin.schema")
 GJ_PER_E3M3 = 38.0
 
 
+def _node_flow():
+    """Average gas through each supply-network node (well pad, hub, train, compressor, meter) over the
+    latest 30 gas days, in 10^3 m^3/d: the larger of what flows in and what flows out."""
+    n = spark.read.table("gld_supply_network")
+    fin = n.groupBy(F.col("to_id").alias("node_id")).agg(F.sum("flow_e3m3d").alias("fi"))
+    fout = n.groupBy(F.col("from_id").alias("node_id")).agg(F.sum("flow_e3m3d").alias("fo"))
+    return fin.join(fout, "node_id", "full_outer").select(
+        "node_id", F.greatest(F.coalesce("fi", F.lit(0.0)), F.coalesce("fo", F.lit(0.0))).alias("node_flow"))
+
+
 def _ext(t):
     return f"`{CATALOG}`.`{SCHEMA}`.`{t}`"
 
@@ -27,11 +37,6 @@ def _daily(table, signals):
     """Wide per-asset daily average pivot of the given signals from a conformed telemetry table."""
     df = spark.read.table(table).where(F.col("signal").isin(signals))
     return df.groupBy("asset_id", "gas_day").pivot("signal", signals).agg(F.avg("value_norm"))
-
-
-def _prices():
-    p = spark.read.table("slv_prices")
-    return p.agg(F.avg("gas_price_gj").alias("gas"), F.avg("carbon_price_t").alias("carbon")).collect()[0]
 
 
 # ===== GLD-01 field production ===============================================================
@@ -54,12 +59,16 @@ def gld_well_scorecard():
     alloc = spark.read.table("slv_allocation").select("gas_day", "well_id", "allocated_e3m3", "produced_e3m3")
     out = tel.join(alloc, ["well_id", "gas_day"], "left")
     # nodal/utilization proxy: produced vs a per-well 30-day rolling max potential
-    wmax = out.groupBy("well_id").agg(F.max("production_flow").alias("pot_flow"))
+    # liquid loading: a flowing well choked back with its tubing-head pressure backed up well above its own norm
+    # (a liquid column building), judged against the well itself since a CSG well and an offshore well run at
+    # very different pressures. Shut-in days (no flow) are not loading.
+    wmax = out.groupBy("well_id").agg(F.max("production_flow").alias("pot_flow"), F.avg("tubing_pressure").alias("tp_norm"))
     out = (out.join(F.broadcast(wmax), "well_id", "left")
            .withColumn("utilization_pct", F.round(100 * F.col("production_flow") / F.when(F.col("pot_flow") > 0, F.col("pot_flow")).otherwise(F.lit(None)), 1))
            .withColumn("liquid_loading_watch",
-                       F.when((F.col("choke_position") < 40) & (F.col("tubing_pressure") > 12000), F.lit("watch")).otherwise(F.lit("ok")))
-           .withColumn("sssv_status", F.when(F.col("sssv_status") >= 50, F.lit("pass")).otherwise(F.lit("not_passed"))))
+                       F.when((F.col("choke_position") < 40) & (F.col("production_flow") > 0) & (F.col("tubing_pressure") > F.col("tp_norm") * 1.03), F.lit("watch")).otherwise(F.lit("ok")))
+           .withColumn("sssv_status", F.when(F.col("sssv_status") >= 50, F.lit("pass")).otherwise(F.lit("not_passed")))
+           .drop("tp_norm"))
     return out.orderBy("well_id", "gas_day")
 
 
@@ -79,9 +88,13 @@ def gld_compression_health():
                         100 - F.coalesce(F.col("vibration_overall"), F.lit(0)) * 3.0
                         - (F.lit(84.0) - F.coalesce(F.col("polytropic_eff"), F.lit(84.0))) * 1.5)), 1))
            .withColumn("rul_days_proxy", F.round(F.greatest(F.lit(5.0), 400 - F.coalesce(F.col("vibration_overall"), F.lit(0)) * 18), 0))
-           # production-at-risk scales with degradation: a healthy unit puts little at risk; a
-           # vibrating, low-health unit puts most of its throughput at risk (drives constraint ranking).
-           .withColumn("production_at_risk_e3m3d", F.round(F.coalesce(F.col("throughput"), F.lit(0)) * (F.lit(100.0) - F.col("health_score")) / 100.0 * 3.0, 0)))
+           )
+    # production-at-risk = the gas this unit actually carries (its share of the plant, from the supply
+    # network) x how far it has fallen below healthy (70): a healthy unit puts none at risk, a failing one all its gas.
+    nf = _node_flow().withColumnRenamed("node_id", "asset_id")
+    out = (out.join(F.broadcast(nf), "asset_id", "left")
+           .withColumn("production_at_risk_e3m3d", F.round(F.coalesce(F.col("node_flow"), F.lit(0.0)) * F.greatest(F.lit(0.0), F.lit(70.0) - F.col("health_score")) / 70.0, 0))
+           .drop("node_flow"))
     return out.orderBy("asset_id", "gas_day")
 
 
@@ -189,10 +202,13 @@ def gld_produced_water():
 
 @dp.table(name="gld_energy_efficiency", comment="Fuel-gas and energy efficiency by gas day: own-use fuel gas, flaring, and their share of production. Cutting own-use/flaring frees salable gas and lowers Scope 1. Join key: gas_day.")
 def gld_energy_efficiency():
+    # every plant's daily fuel gas and flare volume (each meter's daily average), summed across the plants
     fuel = (spark.read.table("slv_telemetry_process").where(F.col("signal") == "fuel_gas_flow")
-            .groupBy("gas_day").agg(F.round(F.avg("value_norm"), 1).alias("fuel_gas_e3m3")))
+            .groupBy("gas_day", "asset_id").agg(F.avg("value_norm").alias("v"))
+            .groupBy("gas_day").agg(F.round(F.sum("v"), 1).alias("fuel_gas_e3m3")))
     flare = (spark.read.table("slv_emissions_ts").where(F.col("signal") == "flare_flow")
-             .groupBy("gas_day").agg(F.round(F.avg("value_norm"), 1).alias("flare_e3m3")))
+             .groupBy("gas_day", "asset_id").agg(F.avg("value_norm").alias("v"))
+             .groupBy("gas_day").agg(F.round(F.sum("v"), 1).alias("flare_e3m3")))
     prod = spark.read.table("slv_allocation").groupBy("gas_day").agg(F.round(F.sum("produced_e3m3"), 1).alias("field_e3m3"))
     return (prod.join(fuel, "gas_day", "left").join(flare, "gas_day", "left")
             .withColumn("own_use_pct", F.round(100 * F.coalesce(F.col("fuel_gas_e3m3"), F.lit(0)) / F.when(F.col("field_e3m3") > 0, F.col("field_e3m3")), 2))
@@ -203,9 +219,13 @@ def gld_energy_efficiency():
 @dp.table(name="gld_carbon_compliance", comment="Carbon / Safeguard-Mechanism position by facility and reporting year: Scope-1 CO2 vs a best-practice baseline, surplus/shortfall and the ACCU cost to cover a shortfall at the carbon price. Join key: facility (area) + reporting year.")
 def gld_carbon_compliance():
     cp = spark.read.table("slv_prices").agg(F.avg("carbon_price_t").alias("cp"))
+    # each facility's Scope-1 CO2 against a baseline on the gas it processed (its throughput x the days reported)
+    nf = _node_flow().withColumnRenamed("node_id", "area_code")
     e = (spark.read.table("gld_emissions_ledger").withColumn("reporting_year", F.year("gas_day"))
          .groupBy("area_code", "reporting_year")
-         .agg(F.round(F.sum("co2_kg") / 1000.0, 0).alias("scope1_t"), F.sum("field_e3m3").alias("prod_e3m3")))
+         .agg(F.round(F.sum("co2_kg") / 1000.0, 0).alias("scope1_t"), F.countDistinct("gas_day").alias("days"))
+         .join(F.broadcast(nf), "area_code", "left")
+         .withColumn("prod_e3m3", F.coalesce(F.col("node_flow"), F.lit(0.0)) * F.col("days")))
     return (e.crossJoin(cp)
             .withColumn("baseline_t", F.round(F.col("prod_e3m3") * F.lit(0.050), 0))
             .withColumn("position_t", F.round(F.col("scope1_t") - F.col("prod_e3m3") * F.lit(0.050), 0))
@@ -328,10 +348,14 @@ def gld_custody_allocation():
            .groupBy("asset_id", "gas_day").agg(F.round(F.avg("value_norm"), 1).alias("metered_e3m3")))
     gc = (spark.read.table("slv_metering").where(F.col("signal").isin(["ghv", "wobbe"]))
           .groupBy("asset_id", "gas_day").pivot("signal", ["ghv", "wobbe"]).agg(F.avg("value_norm")))
-    alloc = spark.read.table("slv_allocation").groupBy("gas_day").agg(F.sum("allocated_e3m3").alias("field_allocated_e3m3"))
-    out = (met.join(gc, ["asset_id", "gas_day"], "left").join(alloc, "gas_day", "left")
-           .withColumn("uaf_e3m3", F.round(F.col("metered_e3m3") - F.col("field_allocated_e3m3") / 2.0, 1))
-           .withColumn("uaf_pct", F.round(100 * (F.col("metered_e3m3") - F.col("field_allocated_e3m3") / 2.0) / F.when(F.col("metered_e3m3") > 0, F.col("metered_e3m3")).otherwise(F.lit(None)), 2)))
+    # allocated = the back-allocated sales gas custody-transferred at this meter that day (its customers' deliveries)
+    site = spark.read.table("slv_asset_master").select("asset_id", F.col("area_code").alias("delivery_point"))
+    alloc = (spark.read.table("slv_customer_deliveries").withColumn("gas_day", F.to_date("gas_day"))
+             .groupBy("delivery_point", "gas_day").agg(F.round(F.sum("delivered_e3m3"), 1).alias("field_allocated_e3m3")))
+    met = met.withColumn("gas_day", F.to_date("gas_day")).join(F.broadcast(site), "asset_id", "left")
+    out = (met.join(gc.withColumn("gas_day", F.to_date("gas_day")), ["asset_id", "gas_day"], "left").join(alloc, ["delivery_point", "gas_day"], "left").drop("delivery_point")
+           .withColumn("uaf_e3m3", F.round(F.col("metered_e3m3") - F.col("field_allocated_e3m3"), 1))
+           .withColumn("uaf_pct", F.round(100 * (F.col("metered_e3m3") - F.col("field_allocated_e3m3")) / F.when(F.col("metered_e3m3") > 0, F.col("metered_e3m3")).otherwise(F.lit(None)), 2)))
     return out.orderBy(F.col("gas_day").desc(), "asset_id")
 
 
@@ -339,11 +363,18 @@ def gld_custody_allocation():
 @dp.table(name="gld_integrity_rbi", comment="Risk-based-inspection register: corrosion rate, remaining life, inspection-due, production-at-risk if it slips. Serves the Integrity surface and Genie integrity.")
 def gld_integrity_rbi():
     a = spark.read.table("slv_asset_master").select("asset_id", "area_code", "equipment_type", "criticality", "install_year")
+    # gas exposed if the asset is out of service: a compressor its own flow, anything else its site's throughput
+    nf = _node_flow()
+    a = (a.join(F.broadcast(nf.withColumnRenamed("node_id", "asset_id").withColumnRenamed("node_flow", "own")), "asset_id", "left")
+          .join(F.broadcast(nf.withColumnRenamed("node_id", "area_code").withColumnRenamed("node_flow", "site")), "area_code", "left"))
     return (a.withColumn("age_years", F.lit(2026) - F.col("install_year"))
             .withColumn("corrosion_rate_mmpy", F.round(0.05 + (F.abs(F.hash("asset_id")) % 30) / 100.0, 3))
             .withColumn("remaining_life_years", F.round(F.greatest(F.lit(0.5), 25 - F.col("age_years") * 0.8 - (F.abs(F.hash("asset_id")) % 5)), 1))
             .withColumn("inspection_due_days", (F.abs(F.hash(F.concat_ws("-", F.col("asset_id"), F.lit("insp")))) % 120) - 15)
-            .withColumn("production_at_risk_e3m3d", F.round((F.abs(F.hash("asset_id")) % 400) * F.when(F.col("criticality") == "A", 1.5).otherwise(1.0), 0))
+            # if its inspection slips: up to 30% of that gas (more for criticality-A kit)
+            .withColumn("production_at_risk_e3m3d", F.round(F.coalesce(F.col("own"), F.col("site"), F.lit(0.0))
+                        * ((F.abs(F.hash("asset_id")) % 30) / 100.0) * F.when(F.col("criticality") == "A", 1.0).otherwise(0.6), 0))
+            .drop("own", "site")
             .withColumn("rbi_status", F.when(F.col("remaining_life_years") < 3, F.lit("high"))
                         .when(F.col("inspection_due_days") < 30, F.lit("due")).otherwise(F.lit("ok"))))
 
@@ -399,26 +430,25 @@ def gld_pred_liquid_loading():
     ws = spark.read.table("gld_well_scorecard")
     latest = ws.withColumn("rn", F.row_number().over(W.partitionBy("well_id").orderBy(F.col("gas_day").desc()))).where("rn=1")
     return latest.select("well_id", "asset_id", "pad_area", "lift_type",
-                         F.round(F.when(F.col("liquid_loading_watch") == "watch", F.lit(0.7)).otherwise(F.lit(0.15))
-                                 + F.least(F.lit(0.3), F.coalesce((F.lit(35.0) - F.col("choke_position")) / 100.0, F.lit(0))), 3).alias("risk_score"),
+                         # a watch well scores 0.6-1.0 and an ok well 0.05-0.35, each by how far it is choked back
+                         F.round(F.when(F.col("liquid_loading_watch") == "watch", F.lit(0.6)).otherwise(F.lit(0.05))
+                                 + F.when(F.col("liquid_loading_watch") == "watch", F.lit(0.4)).otherwise(F.lit(0.3))
+                                 * F.least(F.lit(1.0), F.greatest(F.lit(0.0), F.coalesce((F.lit(70.0) - F.col("choke_position")) / 70.0, F.lit(0)))), 3).alias("risk_score"),
                          "liquid_loading_watch",
                          F.coalesce(F.col("allocated_e3m3"), F.lit(0)).alias("gas_upside_e3m3"))
 
 
 @dp.table(name="gld_forecast_production", comment="ML proxy: 7-day field production forecast with band (Mosaic AI / ai_forecast stand-in). Advisory only.")
 def gld_forecast_production():
-    import pyspark.sql.types as _T
-    schema = _T.StructType([_T.StructField("from_gas_day", _T.StringType()), _T.StructField("horizon_day", _T.IntegerType()),
-                            _T.StructField("forecast_e3m3", _T.DoubleType()), _T.StructField("forecast_lo_e3m3", _T.DoubleType()),
-                            _T.StructField("forecast_hi_e3m3", _T.DoubleType())])
-    fp = spark.read.table("gld_field_production").select("gas_day", "actual_e3m3")
-    agg = fp.agg(F.avg("actual_e3m3").alias("mean"), F.stddev("actual_e3m3").alias("sd"), F.max("gas_day").alias("last")).collect()
-    row = agg[0] if agg else None
-    if not row or row["mean"] is None:
-        return spark.createDataFrame([], schema)
-    mean = float(row["mean"]); sd = float(row["sd"] or 0); last = str(row["last"])
-    rows = [(last, i + 1, round(mean, 1), round(mean - 1.5 * sd, 1), round(mean + 1.5 * sd, 1)) for i in range(7)]
-    return spark.createDataFrame(rows, schema)
+    # computed inside the query (no driver-side collect, which sees no data while the pipeline plans)
+    fp = spark.read.table("gld_field_production")
+    st = fp.agg(F.avg("actual_e3m3").alias("mean"), F.stddev("actual_e3m3").alias("sd"), F.max("gas_day").alias("last"))
+    h = spark.range(1, 8).select(F.col("id").cast("int").alias("horizon_day"))
+    sd = F.coalesce(F.col("sd"), F.lit(0.0))
+    return (st.where(F.col("mean").isNotNull()).crossJoin(h)
+            .select(F.col("last").cast("string").alias("from_gas_day"), "horizon_day",
+                    F.round("mean", 1).alias("forecast_e3m3"), F.round(F.col("mean") - 1.5 * sd, 1).alias("forecast_lo_e3m3"),
+                    F.round(F.col("mean") + 1.5 * sd, 1).alias("forecast_hi_e3m3")))
 
 
 # ===== helper: latest value per tag (for the 3D overlays and asset detail) ===================
@@ -522,7 +552,7 @@ def gld_functional_location():
 @dp.table(name="gld_sites",
           comment="Every site (well pad, gathering hub, processing train, custody station) with its proper name and asset and tag counts. Serves site names on the App's maps, weather tiles and location tree, and Genie. Join key: area_code.",
           schema="""area_code STRING NOT NULL COMMENT 'Site code.',
-          name STRING COMMENT 'Site name, e.g. Well pad BAR045 (Beetaloo Basin).',
+          name STRING COMMENT 'Site name, e.g. Well pad BAR045 (Bowen Basin).',
           n_assets BIGINT COMMENT 'Current assets at the site.',
           n_tags BIGINT COMMENT 'Registered tags at the site.'""")
 def gld_sites():
@@ -583,7 +613,9 @@ def gld_asset_state():
     wo = spark.read.table("slv_workorders").groupBy("asset_id").agg(
         F.sum(F.when(F.col("status").isin("open", "in_progress"), 1).otherwise(0)).alias("open_wos"),
         F.sum(F.when((F.col("priority") == "P1") & (F.col("status").isin("open", "in_progress")), 1).otherwise(0)).alias("open_p1"))
-    trips = spark.read.table("slv_safety_events").where("event_type='esd_trip'").groupBy("asset_id").agg(F.count("*").alias("trips"))
+    # protective trips in the last 90 days count against health (an old trip, long since investigated, does not)
+    trips = (spark.read.table("slv_safety_events").where("event_type='esd_trip'")
+             .where(F.col("event_time") >= F.date_sub(F.current_date(), 90)).groupBy("asset_id").agg(F.count("*").alias("trips")))
     tl = spark.read.table("gld_tag_latest").where("signal='vibration_overall'").select("asset_id", F.col("latest_value").alias("latest_vibration"))
     out = (am.join(ch, "asset_id", "left").join(wo, "asset_id", "left").join(trips, "asset_id", "left").join(tl, "asset_id", "left")
            .fillna({"open_wos": 0, "open_p1": 0, "trips": 0}))
@@ -609,9 +641,9 @@ def gld_constraint_ranking():
         (F.lit(100.0) - F.col("risk_score") * 100).alias("health_score"), F.col("gas_upside_e3m3").alias("production_at_risk_e3m3d"))
     uaf = (spark.read.table("gld_custody_allocation")
            .withColumn("rn", F.row_number().over(W.partitionBy("asset_id").orderBy(F.col("gas_day").desc()))).where("rn=1")
-           .where("uaf_pct > 3")
+           .where("abs(uaf_pct) > 2")   # metered and allocated diverge either way (a meter reading low or high)
            .select(F.lit("custody UAF").alias("constraint_type"), "asset_id", F.lit(None).cast("string").alias("area_code"),
-                   F.lit(None).cast("double").alias("health_score"), (F.col("uaf_e3m3")).alias("production_at_risk_e3m3d")))
+                   F.lit(None).cast("double").alias("health_score"), F.abs(F.col("uaf_e3m3")).alias("production_at_risk_e3m3d")))
     allc = comp.unionByName(ll).unionByName(uaf)
     w = W.orderBy(F.col("production_at_risk_e3m3d").desc_nulls_last())
     return allc.withColumn("rank", F.row_number().over(w)).orderBy("rank")
@@ -707,8 +739,9 @@ def gld_customer_supply():
 def gld_supply_network():
     e = spark.read.table("slv_supply_network")
     al = _last_days(spark.read.table("slv_allocation"), 30)
-    nd = al.select("_d").distinct().count() or 1
-    pad = al.groupBy("area_code").agg((F.sum("allocated_e3m3") / nd).alias("pf"))
+    # average gas day per pad: total over the window / days in it (counted in the query, not on the driver,
+    # where a pipeline sees no data while it plans and the average became a 30-day total)
+    pad = al.groupBy("area_code").agg((F.sum("allocated_e3m3") / F.countDistinct("_d")).alias("pf"))
 
     def step(stop, inflow, key="from_id"):
         return (e.where(F.col("from_stop") == stop).join(inflow, e[key] == inflow["nid"], "inner")
@@ -724,8 +757,7 @@ def gld_supply_network():
     cmp_met = step("compression", agg(tr_cmp))
     # scale compressor->meter links so each meter's inflow equals what its customers received (processing shrink)
     dl = _last_days(spark.read.table("slv_customer_deliveries"), 30)
-    ndd = dl.select("_d").distinct().count() or 1
-    cust = dl.groupBy("customer_id", "delivery_point").agg((F.sum("delivered_e3m3") / ndd).alias("cf"))
+    cust = dl.groupBy("customer_id", "delivery_point").agg((F.sum("delivered_e3m3") / F.countDistinct("_d")).alias("cf"))
     met_out = cust.groupBy("delivery_point").agg(F.sum("cf").alias("mo"))
     met_in = cmp_met.groupBy("to_id").agg(F.sum("flow").alias("mi"))
     k = met_in.join(met_out, met_in["to_id"] == met_out["delivery_point"]).select(F.col("to_id").alias("kid"), (F.col("mo") / F.col("mi")).alias("k"))

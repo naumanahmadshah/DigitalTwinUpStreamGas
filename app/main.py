@@ -230,7 +230,6 @@ def cached(key, ttl, fn):
 # ============================ Navigation / modules ===========================================
 NAV = [
     {"key": "command_centre", "label": "Command Centre", "group": "Home", "level": "Live"},
-    {"key": "facility_view", "label": "Assets map", "group": "Home", "level": "Live"},
     {"key": "reservoir_wells", "label": "Reservoirs & Wells", "group": "Value chain", "level": "Predictive"},
     {"key": "gathering", "label": "Gathering & Flow Assurance", "group": "Value chain", "level": "Predictive"},
     {"key": "processing", "label": "Processing Facility / CPF", "group": "Value chain", "level": "Predictive"},
@@ -437,13 +436,34 @@ def _specs():
                      ("Mean utilization (%)", f"SELECT ROUND(AVG(utilization_pct),1) v FROM {m('gld_well_scorecard')}"),
                      ("Wells on liquid-loading watch", f"SELECT COUNT(*) v FROM {m('gld_pred_liquid_loading')} WHERE liquid_loading_watch='watch'"),
                      ("Wells SSSV not passed", f"SELECT COUNT(*) v FROM (SELECT sssv_status, ROW_NUMBER() OVER (PARTITION BY well_id ORDER BY gas_day DESC NULLS LAST) rn FROM {m('gld_well_scorecard')}) WHERE rn=1 AND sssv_status='not_passed'")],
-            "charts": [("Reservoir pressure trend (kPa)", "line", "gas_day", "tubing_pressure",
-                        f"SELECT gas_day, ROUND(AVG(tubing_pressure),0) tubing_pressure FROM {m('gld_well_scorecard')} GROUP BY gas_day ORDER BY gas_day"),
-                       ("Produced by well (10³ m³)", "bar", "well_id", "produced",
-                        f"SELECT well_id, ROUND(SUM(produced_e3m3),1) produced FROM {m('gld_well_scorecard')} GROUP BY well_id ORDER BY well_id", {"color": "lowbad"})],
+            # wellhead pressure by basin as % of its starting level (a CSG well runs at ~1 MPa, an offshore well at
+            # ~15 MPa, so absolute kPa would flatten the onshore basins); spikes are shut-ins building up
+            # (plant turnarounds), the drift is depletion
+            "charts": [("Wellhead pressure by basin (% of initial)", "line", "gas_day", "Carnarvon",
+                        f"""WITH b AS (SELECT w.gas_day, substring(st.name from '([A-Za-z-]+) Basin\\)$') basin, AVG(w.tubing_pressure) p
+                                       FROM {m('gld_well_scorecard')} w JOIN {m('gld_sites')} st ON st.area_code = w.pad_area GROUP BY 1, 2),
+                                 i AS (SELECT basin, AVG(p) p0 FROM b WHERE gas_day < (SELECT MIN(gas_day) FROM b) + 30 GROUP BY basin),
+                                 r AS (SELECT b.gas_day, b.basin, 100.0 * b.p / NULLIF(i.p0, 0) v FROM b JOIN i ON i.basin = b.basin)
+                            SELECT gas_day,
+                                   ROUND(MAX(CASE WHEN basin = 'Carnarvon' THEN v END), 1) "Carnarvon",
+                                   ROUND(MAX(CASE WHEN basin = 'Browse' THEN v END), 1) "Browse",
+                                   ROUND(MAX(CASE WHEN basin = 'Gippsland' THEN v END), 1) "Gippsland",
+                                   ROUND(MAX(CASE WHEN basin = 'Surat' THEN v END), 1) "Surat",
+                                   ROUND(MAX(CASE WHEN basin = 'Bowen' THEN v END), 1) "Bowen",
+                                   ROUND(MAX(CASE WHEN basin = 'Cooper-Eromanga' THEN v END), 1) "Cooper"
+                            FROM r GROUP BY gas_day ORDER BY gas_day""",
+                        {"series": [{"key": "Carnarvon", "label": "Carnarvon", "color": "#0c5a66"}, {"key": "Browse", "label": "Browse", "color": "#3a8a96"},
+                                    {"key": "Gippsland", "label": "Gippsland", "color": "#6a5cf0"}, {"key": "Surat", "label": "Surat", "color": "#2f7dc4"},
+                                    {"key": "Bowen", "label": "Bowen", "color": "#c98a1e"}, {"key": "Cooper", "label": "Cooper-Eromanga", "color": "#dd4b1a"}]}),
+                       # the average well in each basin: big offshore wells make 20 to 30 times a CSG well
+                       ("Average rate per well by basin, latest 30 days (10³ m³/d)", "bar", "basin", "rate",
+                        f"""SELECT substring(st.name from '([A-Za-z-]+) Basin\\)$') basin, ROUND(AVG(w.produced_e3m3), 1) rate
+                            FROM {m('gld_well_scorecard')} w JOIN {m('gld_sites')} st ON st.area_code = w.pad_area
+                            WHERE w.gas_day >= (SELECT MAX(gas_day) FROM {m('gld_well_scorecard')}) - 30
+                            GROUP BY 1 ORDER BY 2 DESC""")],
             "tables": [(f"SELECT well_id, completion_type, lift_type, ROUND(AVG(utilization_pct),1) utilization_pct FROM {m('gld_well_scorecard')} GROUP BY well_id, completion_type, lift_type ORDER BY utilization_pct LIMIT 500",
                         ["well_id", "completion_type", "lift_type", "utilization_pct"], "Wells by utilization (lowest first)"),
-                       (f"SELECT well_id, pad_area, lift_type, ROUND(risk_score,2) risk_score, liquid_loading_watch, ROUND(gas_upside_e3m3,1) gas_upside_e3m3 FROM {m('gld_pred_liquid_loading')} ORDER BY risk_score DESC NULLS LAST LIMIT 500",
+                       (f"SELECT well_id, pad_area, lift_type, ROUND(risk_score,2) risk_score, liquid_loading_watch, ROUND(gas_upside_e3m3,1) gas_upside_e3m3 FROM {m('gld_pred_liquid_loading')} ORDER BY risk_score DESC NULLS LAST, gas_upside_e3m3 DESC NULLS LAST, well_id LIMIT 500",
                         ["well_id", "pad_area", "lift_type", "risk_score", "liquid_loading_watch", "gas_upside_e3m3"], "Liquid-loading watchlist (ranked by risk)")],
         },
         "gathering": {
@@ -475,12 +495,13 @@ def _specs():
         "compression": {
             "title": "Compression Health", "group": "Value chain", "level": "Prescriptive (shadow)",
             "blurb": "Per-compressor efficiency, vibration, anti-surge margin, RUL proxy and production-at-risk.",
-            "kpis": [("Mean health score", f"SELECT ROUND(AVG(health_score),1) v FROM {m('gld_compression_health')}"),
+            "kpis": [("Mean health score", f"SELECT ROUND(AVG(health_score),1) v FROM {m('gld_compression_health')} WHERE gas_day=(SELECT MAX(gas_day) FROM {m('gld_compression_health')})"),
                      ("Min RUL proxy (days)", f"SELECT ROUND(MIN(rul_days),0) v FROM {m('gld_pred_rul')}"),
                      ("Production at risk (10^3 m^3/d)", f"SELECT ROUND(SUM(par),0) v FROM (SELECT asset_id, MAX(production_at_risk_e3m3d) par FROM {m('gld_compression_health')} GROUP BY asset_id)")],
-            "charts": [("Health score by unit", "bar", "asset_id", "health",
-                        f"SELECT asset_id, ROUND(AVG(health_score),1) health FROM {m('gld_compression_health')} GROUP BY asset_id ORDER BY asset_id", {"color": "lowbad"})],
-            "table": (f"SELECT asset_id, ROUND(AVG(health_score),1) health_score, ROUND(AVG(rul_days_proxy),0) rul_days_proxy, ROUND(MIN(antisurge_margin_pct),1) antisurge_margin_pct, ROUND(MAX(production_at_risk_e3m3d),0) production_at_risk_e3m3d FROM {m('gld_compression_health')} GROUP BY asset_id ORDER BY health_score",
+            # health as of the latest gas day (a two-year average hides a unit that is failing now)
+            "charts": [("Health score by unit, latest gas day", "bar", "asset_id", "health",
+                        f"SELECT asset_id, ROUND(health_score,1) health FROM {m('gld_compression_health')} WHERE gas_day=(SELECT MAX(gas_day) FROM {m('gld_compression_health')}) ORDER BY asset_id", {"color": "lowbad"})],
+            "table": (f"SELECT asset_id, ROUND(health_score,1) health_score, ROUND(rul_days_proxy,0) rul_days_proxy, ROUND(antisurge_margin_pct,1) antisurge_margin_pct, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d FROM {m('gld_compression_health')} WHERE gas_day=(SELECT MAX(gas_day) FROM {m('gld_compression_health')}) ORDER BY health_score",
                       ["asset_id", "health_score", "rul_days_proxy", "antisurge_margin_pct", "production_at_risk_e3m3d"], "Compressor fleet health"),
         },
         "custody": {
@@ -851,7 +872,15 @@ def overview():
 @app.get("/api/constraints")
 def constraints():
     return JSONResponse(cached("constraints", 120, lambda: q(
-        f"SELECT rank, constraint_type, asset_id, area_code, ROUND(health_score,1) health_score, ROUND(production_at_risk_e3m3d,0) production_at_risk_e3m3d FROM {T('gld_constraint_ranking')} ORDER BY rank LIMIT 10")))
+        # each constraint with the well it is (for well constraints) and its site's name, so a screen opened from
+        # the Command Centre can point at exactly the rows, bars and basins behind a red or amber stop
+        f"""SELECT c.rank, c.constraint_type, c.asset_id, COALESCE(c.area_code, am.area_code) area_code, ROUND(c.health_score,1) health_score,
+                   ROUND(c.production_at_risk_e3m3d,0) production_at_risk_e3m3d, l.well_id, st.name site_name
+            FROM {T('gld_constraint_ranking')} c
+            LEFT JOIN {T('gld_pred_liquid_loading')} l ON l.asset_id = c.asset_id
+            LEFT JOIN {T('gld_asset_master')} am ON am.asset_id = c.asset_id
+            LEFT JOIN {T('gld_sites')} st ON st.area_code = COALESCE(c.area_code, am.area_code)
+            ORDER BY c.rank LIMIT 25""")))
 
 
 @app.get("/api/module/{key}")
@@ -900,10 +929,20 @@ def module(key: str):
 @app.get("/api/scenes")
 def scenes():
     return JSONResponse(cached("scenes", 200, lambda: q(
-        f"""SELECT scene_id, COUNT(*) assets,
-                   SUM(is_red) red, SUM(is_amber) amber, SUM(CASE WHEN pin_colour='green' THEN 1 ELSE 0 END) green
-            FROM {T('gld_asset_state')} WHERE scene_id IS NOT NULL
-            GROUP BY scene_id ORDER BY red DESC NULLS LAST, amber DESC NULLS LAST, scene_id""")))
+        # each site with its proper name (e.g. "Well pad BAR029 (Surat Basin)"), sorted along the gas path:
+        # well pads, offshore platforms, gathering hubs, offshore manifolds, gas plants, then custody; by site code
+        f"""SELECT a.scene_id, COUNT(*) assets,
+                   SUM(a.is_red) red, SUM(a.is_amber) amber, SUM(CASE WHEN a.pin_colour='green' THEN 1 ELSE 0 END) green,
+                   CASE WHEN COUNT(DISTINCT a.area_code) > 1 THEN 'Custody metering stations' ELSE MAX(st.name) END AS name,
+                   CASE WHEN a.scene_id LIKE 'scene_BAR%' THEN 'Well pads' WHEN a.scene_id LIKE 'scene_PLT%' THEN 'Offshore platforms'
+                        WHEN a.scene_id LIKE 'scene_GTH%' THEN 'Gathering hubs' WHEN a.scene_id LIKE 'scene_MNF%' THEN 'Offshore manifolds'
+                        WHEN a.scene_id LIKE 'scene_CPF%' THEN 'Gas plants' ELSE 'Custody' END AS kind,
+                   CASE WHEN a.scene_id LIKE 'scene_BAR%' THEN 1 WHEN a.scene_id LIKE 'scene_PLT%' THEN 2
+                        WHEN a.scene_id LIKE 'scene_GTH%' THEN 3 WHEN a.scene_id LIKE 'scene_MNF%' THEN 4
+                        WHEN a.scene_id LIKE 'scene_CPF%' THEN 5 ELSE 6 END AS kind_order
+            FROM {T('gld_asset_state')} a LEFT JOIN {T('gld_sites')} st ON st.area_code = a.area_code
+            WHERE a.scene_id IS NOT NULL
+            GROUP BY a.scene_id ORDER BY kind_order, a.scene_id""")))
 
 
 @app.get("/api/scene/{scene_id}")
@@ -1047,7 +1086,7 @@ def weather_map():
         ])
         nm = {r["area_code"]: r["name"] for r in names}
         for r in rows:
-            r["name"] = nm.get(r["area_code"]) or r["area_code"]   # site name, e.g. "Well pad BAR045 (Beetaloo Basin)"
+            r["name"] = nm.get(r["area_code"]) or r["area_code"]   # site name, e.g. "Well pad BAR045 (Bowen Basin)"
         return rows
     return JSONResponse(cached("weather_map", 300, load))
 
@@ -1076,13 +1115,6 @@ def field_map():
             f["risk_dollars"] = f.get("risk") or 0
         return {"facilities": facs}
     return JSONResponse(cached("map", 200, load))
-
-
-@app.get("/api/assets_bbox")
-def assets_bbox(request: Request):
-    return JSONResponse(cached("assets_bbox", 200, lambda: q(
-        f"""SELECT asset_id, area_code, equipment_type, scene_id, ROUND(gps_lat,5) lat, ROUND(gps_lon,5) lon
-            FROM {T('gld_asset_state')} WHERE gps_lat IS NOT NULL LIMIT 4000""")))
 
 
 @app.get("/api/recommendations")
@@ -1229,7 +1261,7 @@ def _impact(node_id):
         deliv = float(c["delivered_tj_d"] or 0)
         px = float(c["price_gj"] or 0)
         customers.append({**c, "at_risk_tj_d": round(risk_tj, 1), "at_risk_e3m3d": round(risk_e3, 0),
-                          "pct_of_supply": round(100.0 * risk_tj / deliv, 1) if deliv else None,
+                          "pct_of_supply": round(min(100.0, 100.0 * risk_tj / deliv), 1) if deliv else None,   # rounding can't exceed all its gas
                           "revenue_at_risk_per_day": round(risk_tj * 1000.0 * px, 0)})
     customers.sort(key=lambda c: -c["at_risk_tj_d"])
     return {"node": {**sel, "stop_label": STOP_LABEL.get(sel["stop"], sel["stop"])}, "as_of": g["as_of"],

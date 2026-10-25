@@ -132,20 +132,34 @@ def emit_tick(backbone_idx, scenarios: Scenarios, dq: DataQuality, t, seq, day_f
     tags_by_asset = backbone_idx["tags_by_asset"]
     wells_by_wh = backbone_idx["wells_by_wh"]
     rows = []
+    fl = node_flows(backbone_idx, scenarios, t, day_frac) if "pad_hub" in backbone_idx else {"well": {}}
+    cond = backbone_idx.get("cond", {})
     for asset_id, asset in assets.items():
         area = asset["area_code"]
         well = wells_by_wh.get(asset_id)
         mods = scenarios.mods_for(asset, well, t)
         res = physics.reservoir_frac(area, day_frac)
         amb = physics.ambient_c(t, seed)
-        # per-asset degradation baseline (age + slow drift), scenario can raise it
+        # per-asset degradation baseline (age + slow drift), scenario can raise it; kit on a healthy site is
+        # kept in good order (its wear stays low), so a green site reads green on every signal
         age = max(0, 2024 - int(asset.get("install_year") or 2015))
         deg = min(0.92, 0.010 * age + 0.04 * day_frac * physics._h(asset_id, "wear"))
+        if cond.get(area) == "green":
+            deg = min(deg, 0.06)
         deg = max(deg, mods.get("degradation", 0.0))
         wctx = None
         if well is not None:
-            wctx = {"rate": physics.well_rate_e3m3d(well, res, mods)}
-        ctx = {"day_frac": day_frac, "ambient_c": amb, "res_frac": res, "degradation": deg}
+            r = fl["well"].get(asset_id, physics.well_rate_e3m3d(well, res, mods, day=t.date()))
+            wctx = {"rate": r, "well": well, "shut": r <= 0}
+        # the gas this asset carries: a share of its hub (gathering segment), its plant's flow split across the
+        # parallel compressors, the whole plant (process units) or the meter's sales gas
+        et = asset["equipment_type"]
+        f = fl.get(area)
+        if f is not None and et == "gathering_line":
+            f = f * (0.25 + 0.6 * physics._h(asset_id, "seg"))
+        elif f is not None and et == "compressor":
+            f = f / max(1, backbone_idx["ncomp"].get(area, 1))
+        ctx = {"day_frac": day_frac, "ambient_c": amb, "res_frac": res, "degradation": deg, "flow": f}
         for tag in tags_by_asset.get(asset_id, []):
             if measured_only and tag["measured_or_calculated"] != "measured" and tag["cadence"] not in ("NRT",):
                 # still emit calculated NRT signals (dewpoint, eff) daily; skip pure high-freq calc otherwise
@@ -198,8 +212,11 @@ def events_at(backbone_idx, scenarios: Scenarios, t, seq, seed):
         if physics._h(seed, "fg", area, day) > 0.985:
             rows.append(_evt("fire_gas", alist[0], "fg_detection", "warning", "new", t, seq,
                              {"reason": "F&G detector activation"}))
-        # rare protective ESD trip (emergency shutdowns are serious + infrequent)
-        if physics._h(seed, "esd", area, day) > 0.9985:
+        # rare protective ESD trip (emergency shutdowns are serious + infrequent); a healthy site has had none
+        # in the last 90 days (the window the asset health counts trips over)
+        end = backbone_idx.get("end")
+        recent = end is not None and (end - t).days < 90
+        if physics._h(seed, "esd", area, day) > 0.9985 and not (recent and backbone_idx.get("cond", {}).get(area) == "green"):
             rows.append(_evt("sis_esd", alist[0], "esd_trip", "critical", "tripped", t, seq,
                              {"reason": "protective trip"}))
     for (sid, target, f) in scenarios.active_targets(t):
@@ -242,12 +259,48 @@ def _evt(src, asset, etype, sev, state, t, seq, attrs):
     }
 
 
-def index_backbone(tables: dict) -> dict:
-    """Build fast lookups from the backbone dict (asset_model.build_semantic_backbone output)."""
+def index_backbone(tables: dict, cfg: dict | None = None) -> dict:
+    """Build fast lookups from the backbone dict (asset_model.build_semantic_backbone output). With the config,
+    also the gas path (pad -> hub -> plant -> custody meter) and each site's condition, so every tick can size
+    each node's flow from the wells feeding it and keep healthy sites healthy."""
     assets_by_id = {a["asset_id"]: a for a in tables["asset_master"]}
     tags_by_asset: dict = {}
     for tg in tables["tag_registry"]:
         tags_by_asset.setdefault(tg["asset_id"], []).append(tg)
     wells_by_wh = {w["wellhead_asset_id"]: w for w in tables["well_master"]}
-    return {"assets_by_id": assets_by_id, "tags_by_asset": tags_by_asset,
-            "wells_by_wh": wells_by_wh, "tables": tables}
+    idx = {"assets_by_id": assets_by_id, "tags_by_asset": tags_by_asset,
+           "wells_by_wh": wells_by_wh, "tables": tables}
+    if cfg:
+        import asset_model, simclock
+        lay = asset_model.site_layout(cfg)
+        ncomp = {}
+        for a in tables["asset_master"]:
+            if a["equipment_type"] == "compressor":
+                ncomp[a["area_code"]] = ncomp.get(a["area_code"], 0) + 1
+        areas = {a["area_code"] for a in tables["asset_master"]}
+        idx.update({"pad_hub": lay["pad_hub"], "hub_train": lay["hub_train"], "ncomp": ncomp,
+                    "split": (cfg.get("network") or {}).get("train_custody") or {},
+                    "shrink": float((cfg.get("network") or {}).get("processing_shrink", 0.03)),
+                    "cond": {ar: asset_model.site_condition(cfg, ar) for ar in areas},
+                    "end": simclock.timeline(cfg)[1]})
+    return idx
+
+
+def node_flows(idx, scenarios: "Scenarios", t, day_frac) -> dict:
+    """Gas through every node of the path at time t (10^3 m^3/d): each well's rate, summed up the pads, hubs and
+    plants, and split to the custody meters (less processing shrink). Returns {"well": {wellhead: rate}, node: flow}."""
+    wr, flow = {}, {}
+    for wh, w in idx["wells_by_wh"].items():
+        a = idx["assets_by_id"].get(wh)
+        r = physics.well_rate_e3m3d(w, physics.reservoir_frac(w["pad_area"], day_frac), scenarios.mods_for(a, w, t) if a else {}, day=t.date())
+        wr[wh] = r
+        flow[w["pad_area"]] = flow.get(w["pad_area"], 0.0) + r
+    for pad, hub in idx.get("pad_hub", {}).items():
+        flow[hub] = flow.get(hub, 0.0) + flow.get(pad, 0.0)
+    for hub, tr in idx.get("hub_train", {}).items():
+        flow[tr] = flow.get(tr, 0.0) + flow.get(hub, 0.0)
+    for tr, sp in idx.get("split", {}).items():
+        for m, sh in sp.items():
+            flow[m] = flow.get(m, 0.0) + flow.get(tr, 0.0) * float(sh) * (1 - idx.get("shrink", 0.03))
+    flow["well"] = wr
+    return flow

@@ -48,7 +48,7 @@ def generate(spark, cfg, catalog, schema):
     seed = int(cfg["seed"])
     rng = random.Random(f"{seed}:batch")
     bb = asset_model.build_semantic_backbone(cfg)
-    idx = core.index_backbone(bb)
+    idx = core.index_backbone(bb, cfg)
     assets = bb["asset_master"]
     wells = bb["well_master"]
     start, end = simclock.timeline(cfg)
@@ -59,7 +59,7 @@ def generate(spark, cfg, catalog, schema):
 
     import math
     # ---- prices (global daily) + weather (PER LOCATION daily) ----------------------------
-    # Australia is a continent: a Beetaloo (tropical north) site and an Otway (cool south) site have
+    # Australia is a continent: a Cooper (desert) site and a Bowen (subtropical coast-side) site have
     # very different weather on the same day, so weather is generated per area (every map location),
     # driven by its latitude, not a single field-wide average.
     price_rows, weather_rows = [], []
@@ -113,8 +113,8 @@ def generate(spark, cfg, catalog, schema):
                                                   "equipment_type": "wellhead"})
             res = physics.reservoir_frac(w["pad_area"], df)
             mods = scen.mods_for(asset, w, d)
-            actual = physics.well_rate_e3m3d(w, res, mods)
-            potential = physics.well_rate_e3m3d(w, res, {})   # no-scenario potential
+            actual = physics.well_rate_e3m3d(w, res, mods, day=d.date())
+            potential = physics.well_rate_e3m3d(w, res, {}, day=d.date(), planned_only=True)   # no-scenario potential (planned turnarounds excluded)
             field_actual += actual
             field_potential += potential
             # allocation (with small back-allocation noise)
@@ -126,6 +126,8 @@ def generate(spark, cfg, catalog, schema):
             loss = potential - actual
             if loss > max(2.0, 0.03 * potential):
                 cause, desc = _defer_cause(scen, asset, w, d)
+                if cause == "MINOR-VAR" and physics.well_trip(w["well_id"], d.date()):
+                    cause, desc = "WELL-TRIP", "Unplanned well trip (back on line within days)"
                 defer_id += 1
                 defer_rows.append({"deferment_id": f"DEF-{defer_id:07d}", "gas_day": gas_day,
                                    "asset_id": wh, "well_id": w["well_id"], "area_code": w["pad_area"],
@@ -192,17 +194,14 @@ def generate(spark, cfg, catalog, schema):
                                                             "2.3 Seal failure", "5.1 Instrument fault"]),
                               "failure_mode": rng.choice(["bearing wear", "seal leak", "valve fault", "sensor drift"]),
                               "downtime_hours": round(rng.uniform(2, 72), 1), "updated_at": fdate})
-        # open/closed work orders; more for degraded/critical
+        # work-order history (closed: completed or rejected); more for critical kit. What is still OPEN follows
+        # the site's condition and is added below, so healthy sites carry no open work.
         nwo = rng.randint(0, crit_w)
         for _ in range(nwo):
             wo_id += 1
-            created = start + dt.timedelta(days=int(physics._h(a["asset_id"], "wo", wo_id) * ((end - start).days)))
+            created = start + dt.timedelta(days=int(physics._h(a["asset_id"], "wo", wo_id) * ((end - start).days - 30)))
             wo_type = rng.choice(["PM", "CM", "inspection", "calibration"])
-            if wo_type == "PM":
-                # planned maintenance is kept compliant: ~90% completed on schedule
-                status = rng.choices(["completed", "in_progress", "open"], weights=[90, 5, 5])[0]
-            else:
-                status = rng.choices(["completed", "in_progress", "open", "rejected"], weights=[6, 2, 3, 1])[0]
+            status = "completed" if wo_type == "PM" or rng.random() < 0.9 else "rejected"
             priority = rng.choice(["P1", "P2", "P3", "P4"])
             # EAM labour assignment: the WO carries the crew_id it's assigned to (the real join key to HR),
             # and a scheduled finish derived from priority SLA.
@@ -223,6 +222,33 @@ def generate(spark, cfg, catalog, schema):
                                "description": f"Notification on {a['asset_id']}",
                                "raised_date": (end - dt.timedelta(days=rng.randint(1, 120))).strftime("%Y-%m-%d"),
                                "status": rng.choice(["open", "closed"]), "updated_at": end})
+    # open work by site condition: a site needing attention (amber) has one to three open routine work orders
+    # (P2-P4) on its kit; a critical site (red) also has one open P1 on its most critical asset. Healthy sites none.
+    import asset_model
+    by_area = {}
+    for a in assets:
+        by_area.setdefault(a["area_code"], []).append(a)
+    for area in sorted(by_area):
+        cond = asset_model.site_condition(cfg, area)
+        if cond == "green" or area == "CPF002":       # CPF002's open P1 is the vibration story, added below
+            continue
+        ra = random.Random(f"{seed}:openwo:{area}")
+        kit = sorted(by_area[area], key=lambda x: x["asset_id"])
+        picks = ra.sample(kit, min(len(kit), ra.randint(1, 3)))
+        jobs = [(x, ra.choice(["P2", "P3", "P4"])) for x in picks]
+        if cond == "red":
+            top = sorted(kit, key=lambda x: ({"A": 0, "B": 1, "C": 2}.get(x["criticality"], 3), x["asset_id"]))[0]
+            jobs.append((top, "P1"))
+        for x, pr in jobs:
+            wo_id += 1
+            created = end - dt.timedelta(days=ra.randint(1, 25))
+            wo_rows.append({"wo_id": f"WO-{wo_id:07d}", "asset_id": x["asset_id"], "wo_type": ra.choice(["CM", "inspection", "calibration"]) if pr != "P1" else "CM",
+                            "priority": pr, "status": ra.choice(["open", "in_progress"]),
+                            "assigned_crew_id": f"CR-{ra.randint(0, 29):03d}",
+                            "target_completion": (created + dt.timedelta(days={"P1": 3, "P2": 7, "P3": 21, "P4": 45}[pr])).strftime("%Y-%m-%d %H:%M"),
+                            "description": ("Urgent: " if pr == "P1" else "") + f"{x['equipment_type'].replace('_', ' ')} {'repair' if pr == 'P1' else 'maintenance'} on {x['asset_id']}",
+                            "created_date": created.strftime("%Y-%m-%d"),
+                            "cost": round(ra.uniform(8000, 60000) if pr == "P1" else ra.uniform(500, 25000), 0), "updated_at": created})
     # ensure the compressor-scenario asset carries an OPEN high-priority WO + a fresh notification (the story).
     # Resolve to a REAL compressor asset in CPF002 (deterministic: first by asset_id) so the connected-asset
     # cross-domain play (WO + spares + MOC + roster) lands on an asset that actually exists.
