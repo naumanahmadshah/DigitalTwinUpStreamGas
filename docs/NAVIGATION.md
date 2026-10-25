@@ -68,9 +68,10 @@ back at it like a speech bubble.
 
 2. **Impact analysis** (the flow icon on the Command Centre's top tile):\
    The complete gas path as a
-   Sankey, one column per stop: Reservoir, Well pads, Gathering, Processing, Compression, Custody,
-   Customers. Band width is the average daily flow over the latest 30 gas days; stations in alarm have
-   a red outline; hover any stop or band for its name and flow.
+   Sankey, one column per stop: Reservoir, Pads & platforms, Gathering, Processing, Compression,
+   Custody, Customers. Band width is the average daily flow over the latest 30 gas days; stations in
+   alarm have a red outline; every customer is named (small ones with a leader line to their band);
+   hover any stop or band for its name and flow.
    - Click a stop: everything upstream that feeds it and downstream that it supplies stays lit while
      the rest fades. A speech bubble on the right lists the customers it supplies, each with the gas it
      would lose (TJ/d and share of its supply), plus the totals and revenue at risk per day. The
@@ -89,11 +90,13 @@ back at it like a speech bubble.
 
 4. **Site view** (opened from the Field Map, from **View site** in an asset's detail, or from the
    Command Centre's red assets tile):\
-   The site's equipment with a floating tag over each asset, in a hand-painted graphic-novel style.
+   The site's equipment with a floating tag over each asset, in a hand-painted graphic-novel style. It
+   opens on the complete site; scroll in to read the tags.
    - Onshore sites stand on a fenced gravel pad in the outback; the site ute is painted in the site's
-     status colour. Offshore platforms and manifolds stand on a steel deck over a soft blue sea, with a
+     status colour. Offshore platforms and manifolds stand on a steel deck over a deep blue sea, with a
      crew boat (in the site's status colour), a supply vessel, buoys, gulls, a passing whale and other
      platforms on the horizon.
+   - Each site has its own wind: the windsock, the flare flame and its smoke all point downwind.
    - The left list groups the sites (well pads, offshore platforms, gathering hubs, offshore
      manifolds, gas plants, custody) with each site's place underneath; click a heading to fold it,
      click a site to switch to it.
@@ -118,7 +121,8 @@ back at it like a speech bubble.
      dewpoint and H2S trends; and each stream against its spec.
    - *Compression Health:*\
      Fleet health, the shortest remaining life and production at risk; health by
-     unit; and the compressor fleet table (the vibration-to-remaining-life story is on CPF002).
+     unit on the latest gas day; and the compressor fleet table, worst first (the
+     vibration-to-remaining-life story is on the CPF002 Moomba compressors).
    - *Custody Transfer & Export:*\
      The worst unaccounted-for gas (UAF), metering stations, the UAF
      trend and the custody reconciliation.

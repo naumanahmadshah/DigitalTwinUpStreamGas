@@ -80,6 +80,10 @@ A national Australian operator, onshore and offshore, in realistic proportions (
 - **Site health:**\
   About two thirds of the sites are healthy (green), a fifth need attention (amber) and about one in
   ten is critical (red). Work orders, trips and equipment wear follow each site's condition.
+- **Operations:**\
+  Reservoirs deplete along curves (each area at its own rate), wells swing day to day, compression
+  derates on hot summer days, every gas plant has a yearly planned turnaround (its wells shut in for 3
+  to 6 days) and wells trip now and then (recorded as deferment), so the trends look like a real field.
 
 The layout lives in config/twin_config.yaml (basins, platforms, plants, custody points, customers and
 the site-condition odds).
@@ -109,7 +113,7 @@ carry COMMENTs.
   wells). run_generator backfills land_telemetry and land_events (about 5.2M telemetry rows and
   937K events over two years). batch_sources writes the src_\* snapshot tables and the files on the
   landing volume (lab, proving, prices, weather, OSDU well/PVT, geometry, imagery, documents), plus the
-  supply network (reservoir to customer) and a fictional customer book of 21 buyers with two years of
+  supply network (reservoir to customer) and a fictional customer book of 31 buyers with two years of
   daily custody deliveries that reconcile to metered production.
 
 - **Landing:**\
@@ -173,8 +177,8 @@ Document Explorer. A short tour follows; the full screen-by-screen guide is in
   into "N sites" bubbles; hover a site for its details, click it to open its **Site view**.
 - **Site view:**\
   The site's equipment with a tag over each asset; click an asset or its tag to slide in its full detail.
-  Onshore sites sit on an outback pad; offshore platforms and manifolds sit on a steel deck over a soft
-  blue sea with boats, buoys, gulls and other platforms around them.
+  It opens on the complete site. Onshore sites sit on an outback pad; offshore platforms and manifolds
+  sit on a steel deck over a deep blue sea with boats, buoys, gulls and other platforms around them.
 
 **Menu**
 - **Gas flow chain:**\
