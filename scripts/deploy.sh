@@ -174,6 +174,11 @@ lb_endpoint() { dbapi get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}/branch
 PG_ENDPOINT="$(lb_endpoint)"
 if [ -z "$PG_ENDPOINT" ]; then
   info "creating Lakebase project '$LAKEBASE_PROJECT' (takes a minute)…"
+  # a project deleted earlier is kept soft-deleted and still holds its name: when no live project has the
+  # name, purge any soft-deleted one so the name is free (a live, still-provisioning project is never touched)
+  if ! dbapi get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}" | grep -q '"project_id"'; then
+    databricks api delete "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}?purge=true" -p "$PROFILE" >/dev/null 2>&1 || true
+  fi
   databricks api post "/api/2.0/postgres/projects?project_id=${LAKEBASE_PROJECT}" -p "$PROFILE" --json \
     "{\"spec\":{\"display_name\":\"${LAKEBASE_PROJECT}\",\"pg_version\":16,\"default_endpoint_settings\":{\"autoscaling_limit_min_cu\":0.5,\"autoscaling_limit_max_cu\":4,\"suspend_timeout_duration\":\"300s\"}}}" \
     >/dev/null 2>&1 || warn "create call returned non-zero (it may already be provisioning)"

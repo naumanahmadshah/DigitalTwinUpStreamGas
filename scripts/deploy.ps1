@@ -136,6 +136,10 @@ function Lb-Endpoint {
 $PgEndpoint = Lb-Endpoint
 if (-not $PgEndpoint) {
   Info "creating Lakebase project '$Lakebase' (takes a minute)..."
+  # a project deleted earlier is kept soft-deleted and still holds its name: when no live project has the
+  # name, purge any soft-deleted one so the name is free (a live, still-provisioning project is never touched)
+  $live = Db-Json api get "/api/2.0/postgres/projects/$Lakebase" -p $Profile
+  if (-not ($live -and $live.project_id)) { & databricks api delete "/api/2.0/postgres/projects/$Lakebase`?purge=true" -p $Profile *> $null }
   $body = @{ spec = @{ display_name = $Lakebase; pg_version = 16; default_endpoint_settings = @{
             autoscaling_limit_min_cu = 0.5; autoscaling_limit_max_cu = 4; suspend_timeout_duration = '300s' } } } | ConvertTo-Json -Depth 5 -Compress
   & databricks api post "/api/2.0/postgres/projects?project_id=$Lakebase" --json $body -p $Profile *> $null

@@ -8,7 +8,8 @@
 #   - the Genie space
 #   - the AI/BI dashboard
 #   - the Lakebase project (and the synced tables, their sync pipeline and the scheduled sync job)
-#   - the catalog, schema, landing volume and ALL generated data (DROP CATALOG ... CASCADE)
+#   - the project's two schemas (<schema> and <schema>_app) with the landing volume and ALL generated data;
+#     the catalog itself only if nothing else is left in it (an existing, shared catalog is kept)
 #   - a project-created SQL warehouse named "Gas Twin Warehouse" (a pre-existing/shared warehouse is left)
 #
 # Usage:
@@ -149,7 +150,7 @@ except Exception: sys.exit(0)
 print(" ".join(p["pipeline_id"] for p in d if (p.get("name") or "").startswith("Synced table: " + sys.argv[1] + ".")))' "${CATALOG}.${SCHEMA}_app" 2>/dev/null || true)"
 for pid in $PIDS; do databricks pipelines delete "$pid" -p "$PROFILE" >/dev/null 2>&1 || true; done
 if dbapi get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}" | grep -q '"project_id"'; then
-  databricks api delete "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}" -p "$PROFILE" >/dev/null 2>&1 \
+  databricks api delete "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}?purge=true" -p "$PROFILE" >/dev/null 2>&1 \
     && ok "Lakebase project '$LAKEBASE_PROJECT' removed" || warn "could not remove Lakebase project '$LAKEBASE_PROJECT'"
 else ok "no Lakebase project to remove"; fi
 

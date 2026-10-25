@@ -23,6 +23,10 @@ workspace region. Check:
 - Open **Compute > Lakebase** in the workspace. If you cannot create a project there, Lakebase
   Autoscaling is not enabled in this workspace/region; enable it or use a region where it is available.
 - If a project was half-created, delete it and re-run, or pass a different --lakebase (-Lakebase) name.
+- "A soft-deleted project currently has this resource name": a deleted Lakebase project stays
+  soft-deleted for a while and keeps its name. The deploy and the cleanup now purge it for good, so
+  just re-run; to clear it by hand:
+  databricks api delete "/api/2.0/postgres/projects/gas-upstream-twin-lakebase?purge=true" -p PROFILE
 
 The app binds to Lakebase at deploy time, so this must succeed for the deploy to complete.
 

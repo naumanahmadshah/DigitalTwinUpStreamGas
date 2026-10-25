@@ -7,7 +7,8 @@
   .\scripts\deploy.ps1 can run fresh. It removes the bundle resources (app, jobs, medallion pipeline,
   and the bundle workspace folder), the Genie space, the AI/BI dashboard, the Lakebase project (with its synced tables, sync pipeline and
   scheduled sync job), and
-  the catalog + schema + landing volume + ALL generated data (DROP CATALOG ... CASCADE). A
+  the project's two schemas (<schema> and <schema>_app) with the landing volume and ALL generated data;
+  the catalog itself only if nothing else is left in it (an existing, shared catalog is kept). A
   project-created warehouse named "Gas Twin Warehouse" is removed; a pre-existing/shared one is left.
 
 .EXAMPLE
@@ -119,7 +120,7 @@ $pls = Db-Json pipelines list-pipelines -o json -p $Profile
 if ($pls) { $pls | Where-Object { $_.name -like "Synced table: $Catalog.$ServingSchema.*" } | ForEach-Object { & databricks pipelines delete $_.pipeline_id -p $Profile *> $null } }
 $proj = Db-Json api get "/api/2.0/postgres/projects/$Lakebase" -p $Profile
 if ($proj) {
-  & databricks api delete "/api/2.0/postgres/projects/$Lakebase" -p $Profile *> $null
+  & databricks api delete "/api/2.0/postgres/projects/$Lakebase`?purge=true" -p $Profile *> $null
   if ($LASTEXITCODE -eq 0) { Ok "Lakebase project '$Lakebase' removed" } else { Warn "could not remove Lakebase project '$Lakebase'" }
 } else { Ok "no Lakebase project to remove" }
 
