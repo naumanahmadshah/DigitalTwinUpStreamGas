@@ -39,7 +39,7 @@ commercial views.
 The one join key that ties everything together is the **tag id** (for example CPF002-CMP-AT-1018),
 decoded as AREA-SYSTEM-CLASS-NNNN. It resolves through the semantic backbone to its asset, functional
 location, live value and its ids in every other system (PI historian, EAM, OSDU, P&ID). The app's
-**Asset & Document Explorer** demonstrates this resolution live.
+**Asset Explorer** demonstrates this resolution live.
 
 ### Architecture at a glance
 
@@ -95,7 +95,7 @@ the site-condition odds).
 | **Catalog + schema** | A Unity Catalog catalog (default gas_upstream_digital_twin) and schema (digital_twin) holding every table, mart and the landing volume. |
 | **Data generator** | A serverless job that builds the semantic backbone and backfills telemetry, events, work orders, lab assays, weather, prices, spares and more. |
 | **Medallion pipeline** | A serverless Lakeflow (DLT) pipeline: bronze (raw) to silver (conformed) to gold (curated marts). |
-| **The app** | "Databricks Asset Atlas": a FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, site views, the Gas flow chain and Analytics tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
+| **The app** | "Databricks Asset Atlas": a FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, site views, the Gas flow chain, Analytics and Commercial & Finance tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
 | **Genie space** | "Asset Intelligence Genie": a curated natural-language analytics space over the gold marts only, opened in Databricks One from the app's lamp icon. |
 | **AI/BI dashboard** | A published dashboard, "Gas Upstream Digital Twin", with five pages: Field Command Centre, Wells & Lift, Compression Health, Deferment & Emissions, Custody & UAF. |
 | **Lakebase** | A Lakebase Autoscaling project (0.5 to 4 CU, scales to zero after 5 idle minutes): the app's **only** database. Every gold mart the app reads is a Lakebase synced table (one sync pipeline), refreshed straight after the medallion and then every 5 minutes by the "Lakebase sync" job; recommendation decisions are written back to it. |
@@ -153,9 +153,9 @@ carry COMMENTs.
 
 ## Application features
 
-The app ("Databricks Asset Atlas") opens on the Command Centre. The left menu has five icons
-(hover one to see its name): Command Centre, Gas flow chain, Analytics, Recommendation Inbox and Asset &
-Document Explorer. A short tour follows; the full screen-by-screen guide is in
+The app ("Databricks Asset Atlas") opens on the Command Centre. The left menu has six icons
+(hover one to see its name): Command Centre, Gas flow chain, Analytics, Commercial & Finance,
+Recommendation Inbox and Asset Explorer. A short tour follows; the full screen-by-screen guide is in
 [docs/NAVIGATION.md](docs/NAVIGATION.md).
 
 **Command Centre and what opens from it**
@@ -186,15 +186,17 @@ Document Explorer. A short tour follows; the full screen-by-screen guide is in
   Assurance (hydrate margin), Processing / CPF (dewpoint and spec margins), Compression Health (the
   vibration-to-remaining-life story), Custody Transfer & Export (metered vs allocated, UAF).
 - **Analytics:**\
-  Every cross-cutting report as a tab: Integrity & RBI, Safety & Alarms, Emissions &
-  Carbon, Deferment & Losses, Cost & Economics, Planning & Maintenance, Lab & Assay, Commercial &
-  Prices, Weather & Environment (a per-site weather map), Produced Water Management, Fuel-Gas & Energy
-  Efficiency, Carbon / Safeguard Compliance, Methane LDAR, Molecule-to-Market Margin, Spares &
-  Procurement Risk (what to procure, lead time vs remaining life), Capital & Decline-Aware Investment.
+  The operational and HSE reports as tabs on one line: Integrity & RBI, Safety & Alarms, Emissions,
+  Carbon & Safeguard (intensity, CH4 by source and the Safeguard position in one tab), Maintenance, Lab &
+  Assay, Weather (a per-site weather map), Produced Water, Fuel Gas & Energy, Methane LDAR, and Spares &
+  Procurement (what to procure, lead time vs remaining life).
+- **Commercial & Finance:**\
+  The money reports as tabs: Deferment & Losses, Cost & Economics, Commercial & Prices,
+  Molecule-to-Market Margin (netback and take-or-pay) and Capital & Decline-Aware Investment.
 - **Recommendation Inbox:**\
   Prescriptive recommendations with their evidence and linked open work
   orders: accept / reject / annotate, written back and audited to Lakebase, with Undo.
-- **Asset & Document Explorer:**\
+- **Asset Explorer:**\
   Resolve any tag end to end on the left (decoded key, asset link,
   functional location, latest reading with its normal range, and its ids in every other system) and
   browse the physical-location tree on the right (field to basin to site to asset to tag).

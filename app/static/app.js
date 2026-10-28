@@ -306,12 +306,14 @@ function chartsHTML(charts, fx) {
 /* ---------- asset detail drawer + telemetry sparklines + chart zoom (shared across value-chain stops) ---------- */
 function valueChainMods() { return (NAV || []).filter(n => n.group === "Value chain"); }
 function crossMods() { return (NAV || []).filter(n => n.group === "Cross-cutting"); }
-let GFC_CUR = null, GFC_CROSS = null, PENDING_SCENE = null;
+function commMods() { return (NAV || []).filter(n => n.group === "Commercial"); }
+let GFC_CUR = null, GFC_CROSS = null, GFC_COMM = null, PENDING_SCENE = null;
 // navigate to any module; value-chain stops open inside the Gas-flow-chain tab bar, and cross-cutting
 // reports open inside its "Analytics" sub-tabs (item 28).
 function goTo(key) {
   if (valueChainMods().some(m => m.key === key)) { GFC_CUR = key; select("gas_flow_chain"); }
   else if (crossMods().some(m => m.key === key)) { GFC_CROSS = key; select("cross_landscape"); }
+  else if (commMods().some(m => m.key === key)) { GFC_COMM = key; select("commercial_landscape"); }
   else select(key);
 }
 // tiny inline sparkline (no axes) for a telemetry series; click enlarges it
@@ -494,7 +496,7 @@ function ccSpine(cons, bindingTop) {
     const isNext = !isBind && s === secondary;
     const state = isBind ? "bind" : (isNext ? "watch" : "ok");
     // the binding stop (red) puts the most gas at risk; the runner-up (amber) is the one to watch, the stop most likely to bind next
-    const sub = isBind ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : (isNext ? "watch · " + fmt(risk[s] || 0) + " ×10³m³/d at risk" : "nominal");
+    const sub = (isBind || isNext) ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : "";   // the colour says bottleneck (red) or watch (amber)
     const tip = isBind ? "The field's binding constraint: this stop puts the most production at risk right now."
       : isNext ? "Second-highest production at risk: the stop most likely to become the constraint next." : "No significant production at risk at this stop.";
     let goto = stopGoto[s], fattr = "";
@@ -662,15 +664,19 @@ function raiseActiveRow(bar) {
   bar.innerHTML = "";
   order.forEach(r => { const d = document.createElement("div"); d.className = "gfc-row"; r.items.forEach(t => d.appendChild(t)); bar.appendChild(d); });
 }
-// Item 28: left-nav "Analytics" opens the cross-cutting reports as horizontal tabs on top.
-async function renderCrossLandscape(sub) {
-  const cross = crossMods(), v = $("#view");
+// Item 28: left-nav "Analytics" opens the cross-cutting reports as horizontal tabs on top; "Commercial &
+// Finance" does the same for the money reports (deferment, cost, prices, margin, capital plan).
+async function renderCrossLandscape(sub) { return renderLandscape(sub, "cross"); }
+async function renderCommercialLandscape(sub) { return renderLandscape(sub, "comm"); }
+async function renderLandscape(sub, which) {
+  const comm = which === "comm", cross = comm ? commMods() : crossMods(), v = $("#view");
   if (!cross.length) { v.innerHTML = '<div class="placeholder">No reports.</div>'; return; }
-  const active = (sub && cross.some(m => m.key === sub)) ? sub : ((GFC_CROSS && cross.some(m => m.key === GFC_CROSS)) ? GFC_CROSS : cross[0].key);
-  GFC_CROSS = active;
+  const cur = comm ? GFC_COMM : GFC_CROSS;
+  const active = (sub && cross.some(m => m.key === sub)) ? sub : ((cur && cross.some(m => m.key === cur)) ? cur : cross[0].key);
+  if (comm) GFC_COMM = active; else GFC_CROSS = active;
   v.innerHTML = `<div class="gfc-tabs">${cross.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
   raiseActiveRow(v.querySelector(".gfc-tabs"));
-  v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderCrossLandscape(b.getAttribute("data-gfc")));
+  v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderLandscape(b.getAttribute("data-gfc"), which));
   if (active === "recommendations") renderRecommendations("#gfc-body");   // custom renderers (not a /api/module)
   else if (active === "weather") renderWeather("#gfc-body");
   else renderModuleInto("#gfc-body", active);
@@ -1060,7 +1066,7 @@ async function openWeatherSite(area, name) {
   m.classList.add("open"); m.querySelector(".cm-body").scrollTop = 0;
 }
 
-/* ---------- Asset & Document Explorer: the tag contract, resolved live ---------- */
+/* ---------- Asset Explorer: the tag contract, resolved live ---------- */
 function tagCard(t) {
   const u = prettyUnit(t.unit);
   const lv = (t.latest_value === null || t.latest_value === undefined) ? "–" : `${fmt(t.latest_value)} ${u}`;
@@ -1094,7 +1100,6 @@ async function renderAssetExplorer() {
   v.innerHTML = `
     <h2>${d.title}</h2>
     <div class="blurb">${d.blurb || ""}</div>
-    ${kpiRow(d.kpis)}
     <div class="explorer-split">
       <div class="card explorer-col">
         <div class="card-h">Resolve a tag: the contract in action</div>
@@ -1178,9 +1183,9 @@ async function wireLocationTree(run) {
 
 /* ---------- nav + routing ---------- */
 // Each menu item carries its hand-drawn icon (img/nav/<key>.png, made with Meshy in the blue-flame colours).
-const NAV_ICONS = new Set(["command_centre", "gas_flow_chain", "cross_landscape", "recommendations", "asset_model"]);
+const NAV_ICONS = new Set(["command_centre", "gas_flow_chain", "cross_landscape", "commercial_landscape", "recommendations", "asset_model"]);
 const navBtn = (key, label) => `<button class="nav-item${NAV_ICONS.has(key) ? " has-ic" : ""}" data-key="${key}" aria-label="${label}">` +
-  (NAV_ICONS.has(key) ? `<img class="nav-ic" src="img/nav/${key}.png?v=2" alt="" aria-hidden="true">` : "") + `<span>${label}</span></button>`;
+  (NAV_ICONS.has(key) ? `<img class="nav-ic" src="img/nav/${key}.png?v=4" alt="" aria-hidden="true">` : "") + `<span>${label}</span></button>`;
 function buildNav() {
   const groups = {};
   NAV.forEach(n => { (groups[n.group] = groups[n.group] || []).push(n); });
@@ -1189,6 +1194,7 @@ function buildNav() {
   $("#nav").innerHTML = Object.entries(groups).map(([g, items]) => {
     if (g === "Value chain") return navBtn("gas_flow_chain", "Gas flow chain");
     if (g === "Cross-cutting") return navBtn("cross_landscape", "Analytics");
+    if (g === "Commercial") return navBtn("commercial_landscape", "Commercial & Finance");
     return items.map(n => navBtn(n.key, n.label)).join("");
   }).join("");
   $("#nav").querySelectorAll("[data-key]").forEach(b => b.onclick = () => select(b.getAttribute("data-key")));
@@ -1234,6 +1240,7 @@ function route(key) {
   if (key === "impact") return renderImpact();
   if (key === "gas_flow_chain") return renderGasFlowChain();
   if (key === "cross_landscape") return renderCrossLandscape();
+  if (key === "commercial_landscape") return renderCommercialLandscape();
   if (key === "weather") return renderWeather();
   if (key === "navigator") return renderNavigator();
   if (key === "recommendations") return renderRecommendations();

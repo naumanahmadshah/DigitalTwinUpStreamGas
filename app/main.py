@@ -237,22 +237,21 @@ NAV = [
     {"key": "custody", "label": "Custody Transfer & Export", "group": "Value chain", "level": "Informative"},
     {"key": "integrity", "label": "Integrity & RBI", "group": "Cross-cutting", "level": "Predictive"},
     {"key": "safety", "label": "Safety & Alarms", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "emissions", "label": "Emissions & Carbon", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "deferment", "label": "Deferment & Losses", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "economics", "label": "Cost & Economics", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "maintenance", "label": "Planning & Maintenance", "group": "Cross-cutting", "level": "Predictive"},
+    {"key": "emissions", "label": "Emissions, Carbon & Safeguard", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "deferment", "label": "Deferment & Losses", "group": "Commercial", "level": "Informative"},
+    {"key": "economics", "label": "Cost & Economics", "group": "Commercial", "level": "Informative"},
+    {"key": "maintenance", "label": "Maintenance", "group": "Cross-cutting", "level": "Predictive"},
     {"key": "lab", "label": "Lab & Assay", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "commercial", "label": "Commercial & Prices", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "weather", "label": "Weather & Environment", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "produced_water", "label": "Produced Water Management", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "energy", "label": "Fuel-Gas & Energy Efficiency", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "carbon_compliance", "label": "Carbon / Safeguard Compliance", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "commercial", "label": "Commercial & Prices", "group": "Commercial", "level": "Informative"},
+    {"key": "weather", "label": "Weather", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "produced_water", "label": "Produced Water", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "energy", "label": "Fuel Gas & Energy", "group": "Cross-cutting", "level": "Informative"},
     {"key": "methane_ldar", "label": "Methane LDAR", "group": "Cross-cutting", "level": "Predictive"},
-    {"key": "margin", "label": "Molecule-to-Market Margin", "group": "Cross-cutting", "level": "Informative"},
-    {"key": "spares_risk", "label": "Spares & Procurement Risk", "group": "Cross-cutting", "level": "Predictive"},
-    {"key": "capital_plan", "label": "Capital & Decline-Aware Investment", "group": "Cross-cutting", "level": "Informative"},
+    {"key": "margin", "label": "Molecule-to-Market Margin", "group": "Commercial", "level": "Informative"},
+    {"key": "spares_risk", "label": "Spares & Procurement", "group": "Cross-cutting", "level": "Predictive"},
+    {"key": "capital_plan", "label": "Capital & Decline-Aware Investment", "group": "Commercial", "level": "Informative"},
     {"key": "recommendations", "label": "Recommendation Inbox", "group": "Inbox", "level": "Human-in-the-loop"},  # own menu item, after Analytics
-    {"key": "asset_model", "label": "Asset & Document Explorer", "group": "Others", "level": "Governed"},
+    {"key": "asset_model", "label": "Asset Explorer", "group": "Others", "level": "Governed"},
 ]
 
 
@@ -537,18 +536,25 @@ def _specs():
                       ["event_time", "event", "asset_id", "area_code", "equipment_type", "severity"], "Recent safety events (click a row for the asset)"),
         },
         "emissions": {
-            "title": "Emissions & Carbon", "group": "Cross-cutting", "level": "Informative",
-            "blurb": "CH4/CO2/NOx by source, flaring, carbon intensity per 10^3 m^3 and its drivers. Scope 1/2 reporting ledger.",
+            "title": "Emissions, Carbon & Safeguard", "group": "Cross-cutting", "level": "Informative",
+            "blurb": "CH4/CO2/NOx by source, flaring, carbon intensity per 10^3 m^3 and its drivers. Scope 1/2 reporting ledger, and the Safeguard Mechanism position: Scope-1 CO₂ by facility and year against a best-practice baseline, with the ACCU cost to cover any shortfall.",
             "kpis": [("Avg carbon intensity (kg/10^3 m^3)", f"SELECT ROUND(AVG(ci),2) v FROM (SELECT gas_day, SUM(co2_kg)/NULLIF(MAX(field_e3m3),0) ci FROM {m('gld_emissions_ledger')} GROUP BY gas_day)"),
                      ("Total CH4 (kg)", f"SELECT ROUND(SUM(ch4_kg),0) v FROM {m('gld_emissions_ledger')}"),
-                     ("Total CO2 (t)", f"SELECT ROUND(SUM(co2_kg)/1000,0) v FROM {m('gld_emissions_ledger')}")],
+                     ("Total CO2 (t)", f"SELECT ROUND(SUM(co2_kg)/1000,0) v FROM {m('gld_emissions_ledger')}"),
+                     ("Scope-1 this year (t)", f"SELECT ROUND(SUM(scope1_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
+                     ("Position vs baseline (t)", f"SELECT ROUND(SUM(position_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
+                     ("ACCU cost ($)", f"SELECT ROUND(SUM(accu_cost_dollars),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})")],
             # field-level daily intensity (total CO2 / field production), stable, no divide-by-source spikes
             "charts": [("Carbon intensity trend (kg/10^3 m^3)", "line", "gas_day", "ci",
                         f"SELECT gas_day, ROUND(SUM(co2_kg)/NULLIF(MAX(field_e3m3),0),2) ci FROM {m('gld_emissions_ledger')} GROUP BY gas_day ORDER BY gas_day"),
                        ("CH4 by source (kg)", "bar", "source", "ch4",
-                        f"SELECT CASE WHEN equipment_type='compressor' THEN 'Compression' WHEN equipment_type='teg_dehydration' THEN 'Dehydration' WHEN equipment_type='utilities' THEN 'Utilities' WHEN equipment_type='flare' THEN 'Flare' ELSE 'Other' END source, ROUND(SUM(ch4_kg),0) ch4 FROM {m('gld_emissions_ledger')} WHERE ch4_kg>0 GROUP BY 1 ORDER BY 1")],
-            "table": (f"SELECT gas_day, asset_id, ROUND(ch4_kg,1) ch4_kg, ROUND(co2_kg,0) co2_kg, ROUND(nox_kg,1) nox_kg FROM {m('gld_emissions_ledger')} ORDER BY gas_day DESC NULLS LAST, co2_kg DESC NULLS LAST LIMIT 30",
+                        f"SELECT CASE WHEN equipment_type='compressor' THEN 'Compression' WHEN equipment_type='teg_dehydration' THEN 'Dehydration' WHEN equipment_type='utilities' THEN 'Utilities' WHEN equipment_type='flare' THEN 'Flare' ELSE 'Other' END source, ROUND(SUM(ch4_kg),0) ch4 FROM {m('gld_emissions_ledger')} WHERE ch4_kg>0 GROUP BY 1 ORDER BY 1"),
+                       ("Scope-1 by facility (t)", "bar", "facility", "scope1_t",
+                        f"SELECT facility, ROUND(SUM(scope1_t),0) scope1_t FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')}) GROUP BY facility ORDER BY facility")],
+            "tables": [(f"SELECT gas_day, asset_id, ROUND(ch4_kg,1) ch4_kg, ROUND(co2_kg,0) co2_kg, ROUND(nox_kg,1) nox_kg FROM {m('gld_emissions_ledger')} ORDER BY gas_day DESC NULLS LAST, co2_kg DESC NULLS LAST LIMIT 30",
                       ["gas_day", "asset_id", "ch4_kg", "co2_kg", "nox_kg"], "Emissions ledger"),
+                       (f"SELECT facility, reporting_year, scope1_t, baseline_t, position_t, accu_cost_dollars FROM {m('gld_carbon_compliance')} ORDER BY facility, reporting_year DESC NULLS LAST LIMIT 500",
+                      ["facility", "reporting_year", "scope1_t", "baseline_t", "position_t", "accu_cost_dollars"], "Safeguard position by facility & year")],
         },
         "deferment": {
             "title": "Deferment & Losses", "group": "Cross-cutting", "level": "Informative",
@@ -675,17 +681,6 @@ def _specs():
             "table": (f"SELECT gas_day, fuel_gas_e3m3, flare_e3m3, own_use_pct, flaring_pct FROM {m('gld_energy_efficiency')} ORDER BY gas_day DESC NULLS LAST LIMIT 40",
                       ["gas_day", "fuel_gas_e3m3", "flare_e3m3", "own_use_pct", "flaring_pct"], "Energy & fuel-gas ledger (daily)"),
         },
-        "carbon_compliance": {
-            "title": "Carbon / Safeguard Compliance", "group": "Cross-cutting", "level": "Informative",
-            "blurb": "Scope-1 CO₂ by facility and year against a best-practice baseline, with the ACCU cost to cover any shortfall under the Safeguard Mechanism.",
-            "kpis": [("Scope-1 this year (t)", f"SELECT ROUND(SUM(scope1_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
-                     ("Position vs baseline (t)", f"SELECT ROUND(SUM(position_t),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})"),
-                     ("ACCU cost ($)", f"SELECT ROUND(SUM(accu_cost_dollars),0) v FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')})")],
-            "charts": [("Scope-1 by facility (t)", "bar", "facility", "scope1_t",
-                        f"SELECT facility, ROUND(SUM(scope1_t),0) scope1_t FROM {m('gld_carbon_compliance')} WHERE reporting_year=(SELECT MAX(reporting_year) FROM {m('gld_carbon_compliance')}) GROUP BY facility ORDER BY facility")],
-            "table": (f"SELECT facility, reporting_year, scope1_t, baseline_t, position_t, accu_cost_dollars FROM {m('gld_carbon_compliance')} ORDER BY facility, reporting_year DESC NULLS LAST LIMIT 500",
-                      ["facility", "reporting_year", "scope1_t", "baseline_t", "position_t", "accu_cost_dollars"], "Safeguard position by facility & year"),
-        },
         "methane_ldar": {
             "title": "Methane LDAR", "group": "Cross-cutting", "level": "Predictive",
             "blurb": "Leak detection and repair: measured and factor-based fugitive methane by component, its CO₂-e, detector activations, and the annual value of the escaping gas the operator keeps and sells once the leak is repaired.",
@@ -733,11 +728,9 @@ def _specs():
                       ["project_id", "area_code", "project_type", "capex_dollars", "expected_uplift_e3m3d", "annual_value_dollars", "payback_years", "planned_date", "status"], "Development & capital schedule"),
         },
         "asset_model": {
-            "title": "Asset & Document Explorer", "group": "Others", "level": "Governed",
+            "title": "Asset Explorer", "group": "Others", "level": "Governed",
             "blurb": "The semantic backbone: tag-to-asset resolution, the functional-location hierarchy, and cross-system id mapping. Every tag ID is the universal join key.",
-            "kpis": [("Tags in registry", f"SELECT COUNT(*) v FROM {m('gld_tag_context')}"),
-                     ("Assets", f"SELECT COUNT(*) v FROM {m('gld_asset_master')}"),
-                     ("Functional locations", f"SELECT COUNT(*) v FROM {m('gld_functional_location')}")],
+            "kpis": [],
             "charts": [],  # item 55: "Tags by system" bar removed (no analytical value)
         },
     }
@@ -891,7 +884,7 @@ def module(key: str):
 
     def load():
         out = {"key": key, "title": spec["title"], "group": spec["group"], "level": spec["level"], "blurb": spec["blurb"]}
-        if spec["group"] == "Cross-cutting":
+        if spec["group"] in ("Cross-cutting", "Commercial"):
             out["period"] = _data_period()   # these tabs sum over the full dataset; state the period (item 23)
         kpi_specs = spec.get("kpis", [])
         chart_specs = spec.get("charts", [])

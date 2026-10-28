@@ -23,6 +23,11 @@ ICONS = {
     "asset_explorer": "an open folder with documents and an equipment tag with a barcode hanging from it on a string.",
 }
 
+# The Commercial & Finance menu item (deferment, cost, prices, capital plan, margin), in the same style.
+FINANCE = {
+    "commercial_finance": "a large bold dollar sign symbol drawn as a chunky doodle shape, standing beside a small bar chart with three rising bars and an upward arrow.",
+}
+
 # The five value-chain pictures on the Command Centre, in the same style.
 STOPS = {
     "stop_reservoir": "an underground gas reservoir: a cutaway of layered rock strata with a pocket of gas bubbles trapped under a dome, a dotted line rising to the surface.",
@@ -35,12 +40,12 @@ STOPS = {
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--n", type=int, default=2)
-    ap.add_argument("--set", choices=["menu", "stops"], default="menu")
+    ap.add_argument("--set", choices=["menu", "stops", "finance"], default="menu")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     print("credits before:", call("GET", "/v1/balance").get("balance"), flush=True)
     jobs = [(k, i, call("POST", "/v1/text-to-image", {"ai_model": "nano-banana-pro", "prompt": STYLE + v, "aspect_ratio": "1:1",
                                                        "remove_background": True})["result"])
-            for k, v in (STOPS if a.set == "stops" else ICONS).items() for i in range(1, a.n + 1)]
+            for k, v in {"stops": STOPS, "finance": FINANCE}.get(a.set, ICONS).items() for i in range(1, a.n + 1)]
     for k, i, tid in jobs:
         while True:
             t = call("GET", f"/v1/text-to-image/{tid}")
