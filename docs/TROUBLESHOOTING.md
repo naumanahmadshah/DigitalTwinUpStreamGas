@@ -105,6 +105,22 @@ surfaces job hit an issue). Re-run the deploy with --skip-data: it rebuilds surf
 the space id and restarts the app. You can also confirm a Genie space titled "Asset Intelligence
 Genie" exists under **Genie** in the workspace.
 
+## The Commercial & Finance briefing has no Genie summary
+
+The briefing's actions come from Lakebase, so they always show; the summary above them is Genie's, written
+in the background by the app's service principal. Until it arrives (about 20 to 60 seconds after the app
+starts or the actions change) a summary worked out from the actions is shown. If it never arrives:
+- The surfaces job grants the app CAN_RUN on the Genie space, CAN_USE on its warehouse and read on the gold
+  schema. Re-run with --skip-data if the app was created after the space, or check the "Asset
+  Intelligence Genie" space's permissions for the app's service principal.
+- The last Genie error is kept in Lakebase: SELECT last_error, last_attempt_at FROM gas_twin.ai_briefings.
+  After an error the app waits 30 minutes before asking again.
+
+## Preferences are not remembered
+
+They live in Lakebase (gas_twin.settings), created by the Lakebase setup step. On a deploy older than
+this table, re-run with --skip-data to create it and grant the app.
+
 ## The dashboard or Genie step warned but the deploy continued
 
 Surfaces (Genie and the dashboard) are best-effort: a hiccup there does not block the app, which is the
@@ -114,6 +130,7 @@ best-effort: the app needs it, so the deploy stops if it fails (see above).
 ## Re-running safely
 
 - scripts/deploy.sh --skip-data (or -SkipData) redeploys code, rebuilds the medallion, re-syncs
-  Lakebase and rebuilds surfaces without regenerating data. Recommendation decisions in Lakebase are kept.
+  Lakebase and rebuilds surfaces without regenerating data. Recommendation decisions and user preferences
+  in Lakebase are kept.
 - scripts/generate_data.sh re-runs only the data generation (it truncates and rewrites the landing
   data, so it does not double-count).

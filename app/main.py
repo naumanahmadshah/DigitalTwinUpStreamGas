@@ -6,11 +6,17 @@ decisions are written back to Lakebase. Genie and the AI/BI dashboard read the s
 lakehouse. Organised around the physical value chain: Command Centre + maps + one tab per value-chain stop +
 Analytics, with a link out to the Genie space and a human-in-the-loop Recommendation Inbox.
 MV-only: the marts carry the logic; routes issue plain SELECTs over them.
+Each user's preferences live in Lakebase (gas_twin.settings). The Commercial & Finance briefing (the top
+three commercial actions) is read from its gold mart, with a summary Genie writes in the background
+through the conversation API and Lakebase caches (gas_twin.ai_briefings), so it is ready before it is opened.
 """
 from __future__ import annotations
 import concurrent.futures as _cf
 import datetime as _dt
+import hashlib
+import json
 import os
+import re
 import threading
 import time as _time
 from decimal import Decimal
@@ -395,6 +401,16 @@ COL_META = {
     "assigned_to": ("Assigned to", "Crew the work order is assigned to (from the HR roster)."),
     "target_completion": ("Target completion", "Scheduled completion date/time (priority SLA)."),
     "overdue": ("Overdue", "Open work order past its target completion."),
+    "customer_name": ("Customer", "The buyer (fictional)."),
+    "contract_id": ("Contract", "Gas-sales agreement (GSA) or LNG sale-and-purchase agreement (SPA) id."),
+    "contract_type": ("Contract type", "Firm GSA, LNG SPA or Spot."),
+    "price_gj": ("Price ($/GJ)", "Contract price; for spot buyers the average price received over the last 30 days."),
+    "mdq_tj": ("MDQ (TJ/d)", "Maximum daily quantity the buyer can call for."),
+    "take_or_pay_pct": ("Take-or-pay (%)", "Share of MDQ the buyer pays for even if it does not take it (0 = none)."),
+    "nominated_tj_d": ("Nominated (TJ/d)", "Average daily nomination over the last 30 gas days."),
+    "delivered_tj_d": ("Delivered (TJ/d)", "Average energy delivered per gas day over the last 30 gas days."),
+    "shortfall_days_30d": ("Short days (30 d)", "Gas days in the last 30 delivered below the buyer's nomination."),
+    "contract_end": ("Contract end", "When the contract expires (the renewal and re-pricing point)."),
 }
 
 _UNIT_SUFFIX = {"e3m3d": "(10³ m³/d)", "e3m3": "(10³ m³)", "molpct": "(Mol %)", "pct": "(%)",
@@ -641,8 +657,11 @@ def _specs():
                         {"series": [{"key": "revenue", "label": "Sale revenue ($M)"}, {"key": "cost", "label": "Cost of generation ($M)"}, {"key": "profit", "label": "Profit ($M)"}]}),
                        ("Sales gas price trend ($/GJ)", "line", "gas_day", "gas_price_gj",
                         f"SELECT gas_day, ROUND(gas_price_gj,2) gas_price_gj FROM {m('gld_commercial')} ORDER BY gas_day")],
-            "table": (f"SELECT c.gas_day, c.gas_price_gj, c.carbon_price_t, c.nominated_e3m3, c.actual_e3m3, c.nomination_delivery_pct, e.revenue_dollars, e.cost_of_generation_dollars, e.profit_dollars FROM {m('gld_commercial')} c LEFT JOIN (SELECT gas_day, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(lifting_cost_dollars),0) cost_of_generation_dollars, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) profit_dollars FROM {m('gld_economics')} GROUP BY gas_day) e ON c.gas_day=e.gas_day::date ORDER BY c.gas_day DESC NULLS LAST LIMIT 500",
-                      ["gas_day", "gas_price_gj", "carbon_price_t", "nominated_e3m3", "actual_e3m3", "nomination_delivery_pct", "revenue_dollars", "cost_of_generation_dollars", "profit_dollars"], "Commercial ledger (daily)"),
+            "tables": [(f"SELECT c.gas_day, c.gas_price_gj, c.carbon_price_t, c.nominated_e3m3, c.actual_e3m3, c.nomination_delivery_pct, e.revenue_dollars, e.cost_of_generation_dollars, e.profit_dollars FROM {m('gld_commercial')} c LEFT JOIN (SELECT gas_day, ROUND(SUM(revenue_dollars),0) revenue_dollars, ROUND(SUM(lifting_cost_dollars),0) cost_of_generation_dollars, ROUND(SUM(revenue_dollars-lifting_cost_dollars-carbon_cost_dollars),0) profit_dollars FROM {m('gld_economics')} GROUP BY gas_day) e ON c.gas_day=e.gas_day::date ORDER BY c.gas_day DESC NULLS LAST LIMIT 500",
+                        ["gas_day", "gas_price_gj", "carbon_price_t", "nominated_e3m3", "actual_e3m3", "nomination_delivery_pct", "revenue_dollars", "cost_of_generation_dollars", "profit_dollars"], "Commercial ledger (daily)"),
+                       # the contract book: price, floor, nominations vs delivery and expiry, per buyer (the briefing's contract actions point here)
+                       (f"SELECT customer_name, contract_id, contract_type, price_gj, mdq_tj, take_or_pay_pct, nominated_tj_d, delivered_tj_d, shortfall_days_30d, contract_end FROM {m('gld_customer_supply')} ORDER BY contract_end, customer_name",
+                        ["customer_name", "contract_id", "contract_type", "price_gj", "mdq_tj", "take_or_pay_pct", "nominated_tj_d", "delivered_tj_d", "shortfall_days_30d", "contract_end"], "Contracts (last 30 gas days)")],
         },
         "weather": {
             "title": "Weather & Environment", "group": "Cross-cutting", "level": "Informative",
@@ -1156,6 +1175,187 @@ async def decide(rec_id: str, request: Request):
         return JSONResponse({"ok": True, "decided_by": who})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+
+# ============================ User settings (Lakebase gas_twin.settings) ========================
+# One row per user per preference. The Databricks Apps proxy forwards the signed-in user's e-mail.
+SETTING_KEYS = {"commercial_briefing", "last_tabs", "site_list_folded"}
+
+
+def _who(request: Request) -> str:
+    return request.headers.get("X-Forwarded-Email") or request.headers.get("X-Forwarded-User") or "app-user"
+
+
+@app.get("/api/settings")
+def get_settings(request: Request):
+    who = _who(request)
+    try:
+        rows = q("SELECT setting_key, setting_value FROM gas_twin.settings WHERE user_email=%s", (who,))
+    except Exception as e:   # the table is missing (an older deploy): the app works, preferences just are not kept
+        return JSONResponse({"user": who, "settings": {}, "stored": False, "error": str(e)[:160]})
+    return JSONResponse({"user": who, "settings": {r["setting_key"]: r["setting_value"] for r in rows}, "stored": True})
+
+
+@app.put("/api/settings/{key}")
+async def put_setting(key: str, request: Request):
+    if key not in SETTING_KEYS:
+        return JSONResponse({"ok": False, "error": "unknown setting"}, status_code=400)
+    who, val = _who(request), (await request.json()).get("value")
+    try:
+        if val is None:   # clearing a preference removes its row
+            q("DELETE FROM gas_twin.settings WHERE user_email=%s AND setting_key=%s", (who, key))
+        else:
+            q("""INSERT INTO gas_twin.settings (user_email, setting_key, setting_value, updated_at) VALUES (%s, %s, %s::jsonb, now())
+                 ON CONFLICT (user_email, setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value, updated_at=now()""",
+              (who, key, json.dumps(val)))
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:200]}, status_code=500)
+
+
+# ============================ Commercial briefing (Genie, prepared ahead) =======================
+# The top three commercial actions come from gld_commercial_actions (ranked across the Commercial & Finance
+# reports by AUD at stake per year). Genie writes the summary through the conversation API in a background
+# thread, at start-up and again whenever the ranked actions change; Lakebase caches it (gas_twin.ai_briefings)
+# so the briefing is ready before anyone opens Commercial & Finance. Until Genie's summary is in, a summary
+# worked out from the same actions is shown.
+BRIEF_KEY = "commercial_top_actions"
+BRIEF_Q = ("What are the top 3 commercial actions we should take now, and why? Use gld_commercial_actions, ranks 1 to 3. "
+           "Answer for an executive in plain prose of no more than three sentences, with no list, no table and no mention "
+           "of tables, columns or ranks, and money rounded the way an executive says it (for example $202M a year): say what "
+           "the three actions are worth together, which one matters most, and why.")
+BRIEF_RECHECK_S = 600          # look for changed actions at most every 10 minutes (only when the app is in use)
+BRIEF_RETRY_S = 1800           # after a Genie error, wait 30 minutes before asking again
+_brief = {"checked": 0.0, "running": False}
+_brief_lock = threading.Lock()
+
+
+def _money(v):
+    v = float(v or 0); a = abs(v)
+    if a >= 1e9: return f"${v / 1e9:.1f}B"
+    if a >= 1e8: return f"${v / 1e6:.0f}M"
+    if a >= 1e6: return f"${v / 1e6:.1f}M"
+    if a >= 1e3: return f"${v / 1e3:.0f}k"
+    return f"${v:.0f}"
+
+
+def _actions():
+    return q(f"SELECT rank, lever, action, detail, value_dollars_yr, value_basis, module_key, module_label, focus_ids, focus_kpis, data_as_of "
+             f"FROM {T('gld_commercial_actions')} ORDER BY rank")
+
+
+def _actions_hash(acts):
+    top = [[a.get("lever"), a.get("action"), round(float(a.get("value_dollars_yr") or 0), -3)] for a in acts[:3]]
+    return hashlib.md5(json.dumps([BRIEF_Q, top]).encode()).hexdigest()   # a new question also earns a fresh answer
+
+
+def _brief_row():
+    r = q("SELECT briefing_key, data_as_of, content_hash, summary, source, generated_at, last_attempt_at, last_error FROM gas_twin.ai_briefings WHERE briefing_key=%s", (BRIEF_KEY,))
+    return r[0] if r else None
+
+
+def _ask_genie(question, timeout=300):
+    """One Genie conversation: start it, poll until it completes, return (conversation id, the text answer)."""
+    api, base = _client().api_client.do, f"/api/2.0/genie/spaces/{GENIE_SPACE}"
+    r = api("POST", f"{base}/start-conversation", body={"content": question})
+    cid, mid, t0 = r["conversation_id"], r["message_id"], _time.time()
+    while _time.time() - t0 < timeout:
+        _time.sleep(4)
+        m = api("GET", f"{base}/conversations/{cid}/messages/{mid}")
+        st = m.get("status")
+        if st == "COMPLETED":
+            texts = [a["text"]["content"] for a in (m.get("attachments") or []) if (a.get("text") or {}).get("content")]
+            if not texts:
+                raise RuntimeError("Genie answered without a text summary")
+            return cid, "\n".join(texts)
+        if st in ("FAILED", "CANCELLED", "QUERY_RESULT_EXPIRED"):
+            raise RuntimeError(f"Genie {st}: {str(m.get('error') or '')[:200]}")
+    raise TimeoutError("Genie did not answer within 5 minutes")
+
+
+def _plain(text):
+    """Genie writes light markdown; the briefing shows plain prose."""
+    s = re.sub(r"\*\*|__|`", "", text or "")
+    s = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "", s, flags=re.M)
+    s = re.sub(r"\s+", " ", s).strip().replace("10^3 m^3", "10³ m³").replace("m^3", "m³")
+    s = re.sub(r"(\d) (?:x )?10³", r"\1 ×10³", s)   # "734 10³ m³/d" -> "734 ×10³ m³/d"
+    return s[:900]
+
+
+def _save_brief(**cols):
+    keys = ["briefing_key"] + list(cols)
+    q(f"""INSERT INTO gas_twin.ai_briefings ({", ".join(keys)}) VALUES ({", ".join(["%s"] * len(keys))})
+          ON CONFLICT (briefing_key) DO UPDATE SET {", ".join(f"{k}=EXCLUDED.{k}" for k in cols)}""",
+      [BRIEF_KEY] + list(cols.values()))
+
+
+def _refresh_brief():
+    """Ask Genie for a fresh summary if the ranked actions changed since the cached one (runs in a thread)."""
+    with _brief_lock:
+        if _brief["running"]:
+            return
+        _brief["running"], _brief["checked"] = True, _time.time()
+    try:
+        acts = _actions()
+        if not GENIE_SPACE or not acts:
+            return
+        h, row = _actions_hash(acts), _brief_row()
+        if row and row.get("content_hash") == h and row.get("summary"):
+            return                                   # Genie's summary still describes these actions
+        if row and row.get("last_error") and row.get("last_attempt_at"):
+            last = _dt.datetime.fromisoformat(str(row["last_attempt_at"]).replace("Z", "+00:00"))
+            if (_dt.datetime.now(_dt.timezone.utc) - last).total_seconds() < BRIEF_RETRY_S:
+                return                               # back off after a failure
+        now = _dt.datetime.now(_dt.timezone.utc)
+        try:
+            cid, text = _ask_genie(BRIEF_Q)
+            _save_brief(data_as_of=acts[0].get("data_as_of"), content_hash=h, summary=_plain(text), source="genie",
+                        genie_conversation_id=cid, generated_at=now, last_attempt_at=now, last_error=None)
+        except Exception as e:
+            _save_brief(last_attempt_at=now, last_error=str(e)[:300])
+    except Exception:
+        pass                                         # no table yet / Lakebase waking up: try again on the next check
+    finally:
+        _brief["running"] = False
+
+
+def _kick_brief(force=False):
+    if force or _time.time() - _brief["checked"] > BRIEF_RECHECK_S:
+        threading.Thread(target=_refresh_brief, daemon=True, name="genie-brief").start()
+
+
+@app.on_event("startup")
+def _brief_on_startup():
+    _kick_brief(force=True)                          # prepare the briefing as soon as the app starts
+
+
+@app.get("/api/briefing/commercial")
+def commercial_briefing():
+    _kick_brief()
+    try:
+        acts = _actions()
+    except Exception as e:
+        return JSONResponse({"actions": [], "error": str(e)[:160]})
+    top = acts[:3]
+    for a in top:
+        a["value_label"] = _money(a.get("value_dollars_yr")) + " a year"
+    try:
+        row = _brief_row()
+    except Exception:
+        row = None
+    fresh = bool(row and row.get("summary") and row.get("content_hash") == _actions_hash(acts))
+    if fresh:
+        summary, source = _plain(row["summary"]), "genie"
+    else:   # Genie's summary for these actions is not in yet: the same story, worked out from the actions
+        tot = sum(float(a.get("value_dollars_yr") or 0) for a in top)
+        lead = top[0]["action"] if top else ""
+        summary = (f"Together these three actions are worth about {_money(tot)} a year. The largest is to "
+                   f"{lead[:1].lower() + lead[1:]} ({top[0]['value_label']}).") if top else ""
+        source = "rules"
+    return JSONResponse({"actions": top, "summary": summary, "summary_source": source,
+                         "pending": bool(GENIE_SPACE) and not fresh and _brief["running"],
+                         "data_as_of": top[0].get("data_as_of") if top else None,
+                         "generated_at": row.get("generated_at") if fresh else None, "genie": bool(GENIE_SPACE)})
 
 
 @app.get("/health")

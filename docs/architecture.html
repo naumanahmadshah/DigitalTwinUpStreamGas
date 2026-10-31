@@ -137,13 +137,13 @@
     <div class="stage">
       <div class="cap" style="background:var(--gold)">
         <div class="n">Step 5</div><div class="t">Gold marts</div>
-        <div class="d">The serving layer &middot; 41 marts (Genie and the dashboard read these)</div>
+        <div class="d">The serving layer &middot; 42 marts (Genie and the dashboard read these)</div>
       </div>
       <div class="body" style="--ac:var(--gold)">
         <div class="card"><div class="ct">Production and constraint</div><div class="cd">field production, well scorecard, plant KPI, asset state, constraint ranking, flow assurance, custody.</div></div>
         <div class="card"><div class="ct">Reliability and integrity</div><div class="cd">compression health, work orders, failures, maintenance reliability, integrity / RBI, spares risk.</div></div>
         <div class="card"><div class="ct">Emissions and sustainability</div><div class="cd">emissions ledger, carbon compliance, methane LDAR, produced water, energy efficiency.</div></div>
-        <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, margin, capital plan, deferment, lab, weather; supply network, customer supply (impact analysis).</div></div>
+        <div class="card"><div class="ct">Commercial and planning</div><div class="cd">economics, commercial, margin, capital plan, deferment, lab, weather; supply network, customer supply (impact analysis); the ranked top commercial actions.</div></div>
         <div class="card"><div class="ct">Predictive and advisory</div><div class="cd">remaining useful life, liquid-loading risk, production forecast, recommendations.</div></div>
         <div class="card"><div class="ct">App-serving backbone</div><div class="cd">tag context, asset master, functional locations, sites, per-asset signal series, safety events.</div></div>
       </div>
@@ -160,7 +160,7 @@
       <div class="body" style="--ac:var(--lake)">
         <div class="card"><div class="ct">Synced tables</div><div class="cd">every gold mart the app reads, as a Postgres table of the same name (schema digital_twin_app), in one sync pipeline.</div></div>
         <div class="card"><div class="ct">Kept fresh</div><div class="cd">synced right after each medallion load, then every 5 minutes by the &ldquo;Lakebase sync&rdquo; job; unchanged marts are skipped.</div></div>
-        <div class="card"><div class="ct">Write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions here (audited).</div></div>
+        <div class="card"><div class="ct">Write-back &larr;</div><div class="cd">the app writes accept / reject / annotate decisions here (audited), each user's preferences (settings) and Genie's cached commercial briefing.</div></div>
         <div class="card"><div class="ct">Autoscaling</div><div class="cd">0.5 to 4 CU; the compute suspends after 5 idle minutes and wakes on the next request.</div></div>
       </div>
     </div>
@@ -174,8 +174,8 @@
         <div class="d">How users and agents access it</div>
       </div>
       <div class="body" style="--ac:var(--serve)">
-        <div class="card"><div class="ct">Databricks Asset Atlas app (from Lakebase)</div><div class="cd">FastAPI + single-page UI: Command Centre, maps, site views, analytics and reservoir-to-customer impact analysis (with PDF export). Reads and writes Lakebase only.</div></div>
-        <div class="card"><div class="ct">Genie space (from gold)</div><div class="cd">&ldquo;Asset Intelligence Genie&rdquo;: natural-language analytics over the gold marts only, opened in Databricks One.</div></div>
+        <div class="card"><div class="ct">Databricks Asset Atlas app (from Lakebase)</div><div class="cd">FastAPI + single-page UI: Command Centre, maps, site views, analytics and reservoir-to-customer impact analysis (with PDF export). Reads and writes Lakebase only; in the background it asks Genie (conversation API) to summarise the top commercial actions.</div></div>
+        <div class="card"><div class="ct">Genie space (from gold)</div><div class="cd">&ldquo;Asset Intelligence Genie&rdquo;: natural-language analytics over the gold marts only, opened in Databricks One; also writes the app's Commercial &amp; Finance briefing.</div></div>
         <div class="card"><div class="ct">AI/BI dashboard (from gold)</div><div class="cd">published summary of production, reliability and emissions.</div></div>
       </div>
     </div>
@@ -192,9 +192,9 @@
 
   <div class="notes">
     <div class="note"><h4>Compute</h4><p>Everything runs on serverless: the generation job, the Lakeflow medallion pipeline, the Lakebase sync pipeline, the SQL warehouse behind Genie and the dashboard, and Lakebase Autoscaling behind the app.</p></div>
-    <div class="note"><h4>Governance</h4><p>All lakehouse objects live in one Unity Catalog catalog and schema, and the synced tables in a sibling schema. Tables and columns carry COMMENTs; the app service principal is granted read on the synced marts and read/write on the write-back tables in Lakebase.</p></div>
+    <div class="note"><h4>Governance</h4><p>All lakehouse objects live in one Unity Catalog catalog and schema, and the synced tables in a sibling schema. Tables and columns carry COMMENTs; the app service principal is granted read on the synced marts and read/write on the write-back tables in Lakebase, and may ask the Genie space questions (CAN_RUN, its warehouse and read on gold).</p></div>
     <div class="note"><h4>Parameterized</h4><p>Catalog, schema, warehouse, Lakebase project and the sync schedule are bundle variables, so one asset bundle deploys to any workspace with a single command.</p></div>
-    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the header Genie link is simply hidden; the app, Genie and the dashboard are independent surfaces over the same gold.</p></div>
+    <div class="note"><h4>Graceful degradation</h4><p>Without Genie the header Genie link is simply hidden and the briefing shows a summary worked out from its actions; the app, Genie and the dashboard are independent surfaces over the same gold.</p></div>
   </div>
 
   <footer>Gas Upstream Digital Twin &middot; bronze - silver - gold on Databricks &middot; see README.md for deployment</footer>

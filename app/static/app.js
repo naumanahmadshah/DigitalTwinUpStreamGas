@@ -134,6 +134,7 @@ window.addEventListener("resize", () => drawBars());
 
 /* ---------- shared render helpers ---------- */
 const escAttr = (s) => String(s).replace(/"/g, "&quot;").replace(/</g, "&lt;");
+const escH = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // Every work-order id in the app is a link to its detail (handled by the global click handler).
 const woLink = id => `<a href="#" class="cell-link wolink" data-wo-id="${escAttr(id)}">${id}</a>`;
 const linkWOs = html => String(html).replace(/\bWO-\d{4,}\b/g, m => woLink(m));
@@ -482,6 +483,21 @@ function focusFrom(list, level, lead) {
            text: `${lead}: ${what}${where ? ` (${where})` : ""}, ${fmt(risk)} ×10³m³/d at risk. Highlighted below.` };
 }
 
+// A comic-style exclamation mark (tilted bar and dot over a black offset shadow) that hops to draw the eye.
+function alertMark(tone, label) {
+  const shape = '<polygon points="10,3 38,0 27,64 16,65"/><ellipse cx="19" cy="83" rx="11" ry="8.5"/>';
+  return `<span class="cc2-alert ${tone}" role="img" aria-label="${label}"><svg viewBox="0 0 50 96">
+    <g transform="rotate(12 25 48)"><g class="sh" transform="translate(4 2.5)">${shape}</g><g class="fg">${shape}</g></g></svg></span>`;
+}
+
+// Sit a stop's exclamation mark just off the top-right corner of its picture (the drawn picture, not the
+// image box, since each picture has its own proportions).
+function placeAlert(img) {
+  const m = img.parentElement.querySelector(".cc2-alert"); if (!m || !img.naturalWidth) return;
+  const w = Math.min(img.clientWidth, img.clientHeight * img.naturalWidth / img.naturalHeight);
+  m.style.left = `calc(50% + ${(w / 2 - 6).toFixed(0)}px)`;
+}
+
 function ccSpine(cons, bindingTop) {
   const stopOf = { "compression": "Processing", "liquid loading": "Wells", "custody UAF": "Custody" };
   const stops = ["Reservoir", "Wells", "Gathering", "Processing", "Custody"];
@@ -496,9 +512,11 @@ function ccSpine(cons, bindingTop) {
     const isNext = !isBind && s === secondary;
     const state = isBind ? "bind" : (isNext ? "watch" : "ok");
     // the binding stop (red) puts the most gas at risk; the runner-up (amber) is the one to watch, the stop most likely to bind next
-    const sub = (isBind || isNext) ? fmt(risk[s] || 0) + " ×10³m³/d at risk" : "";   // the colour says bottleneck (red) or watch (amber)
-    const tip = isBind ? "The field's binding constraint: this stop puts the most production at risk right now."
-      : isNext ? "Second-highest production at risk: the stop most likely to become the constraint next." : "No significant production at risk at this stop.";
+    // whichever stops carry the most production at risk get an exclamation badge: red for the bottleneck,
+    // amber for the one to watch (any of the five, from the live constraint ranking); the figure is in the tooltip
+    const mark = isBind ? alertMark("red", "bottleneck") : (isNext ? alertMark("amber", "watch") : "");
+    const tip = isBind ? `The field's binding constraint: this stop puts the most production at risk right now (${fmt(risk[s] || 0)} ×10³m³/d).`
+      : isNext ? `Second-highest production at risk (${fmt(risk[s] || 0)} ×10³m³/d): the stop most likely to become the constraint next.` : "No significant production at risk at this stop.";
     let goto = stopGoto[s], fattr = "";
     if (isBind || isNext) {   // open the tab where the cause lives, with the cause highlighted there
       const mine = (cons || []).filter(c => (stopOf[c.constraint_type] || "Processing") === s);
@@ -506,9 +524,8 @@ function ccSpine(cons, bindingTop) {
       goto = CC_FOCUS[s].key; fattr = ` data-focus="${s}"`;
     }
     return `<div class="cc2-stop ccgo ${state}" data-goto="${goto}"${fattr} title="${tip}">
-        <img class="cc2-stop-img" src="img/stop_${s.toLowerCase()}.png?v=3" alt="${s}">
+        <span class="cc2-imgwrap"><img class="cc2-stop-img" src="img/stop_${s.toLowerCase()}.png?v=4" alt="${s}" onload="placeAlert(this)">${mark}</span>
         <span class="cc2-stop-name">${s}</span>
-        <span class="cc2-stop-sub">${sub}</span>
       </div>${i < stops.length - 1 ? '<span class="cc2-pipe"></span>' : ""}`;
   }).join("")}</div>`;
 }
@@ -642,7 +659,7 @@ async function renderGasFlowChain(sub) {
   const stops = valueChainMods(), v = $("#view");
   if (!stops.length) { v.innerHTML = '<div class="placeholder">No value-chain stops.</div>'; return; }
   const active = (sub && stops.some(m => m.key === sub)) ? sub : ((GFC_CUR && stops.some(m => m.key === GFC_CUR)) ? GFC_CUR : stops[0].key);
-  GFC_CUR = active;
+  GFC_CUR = active; rememberTab("gas_flow_chain", active);
   v.innerHTML = `<div class="gfc-tabs">${stops.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
   raiseActiveRow(v.querySelector(".gfc-tabs"));
   v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderGasFlowChain(b.getAttribute("data-gfc")));
@@ -674,13 +691,128 @@ async function renderLandscape(sub, which) {
   const cur = comm ? GFC_COMM : GFC_CROSS;
   const active = (sub && cross.some(m => m.key === sub)) ? sub : ((cur && cross.some(m => m.key === cur)) ? cur : cross[0].key);
   if (comm) GFC_COMM = active; else GFC_CROSS = active;
-  v.innerHTML = `<div class="gfc-tabs">${cross.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
+  rememberTab(comm ? "commercial" : "analytics", active);
+  // Commercial & Finance carries the button that brings the briefing back, whatever was chosen in it
+  const bb = comm ? `<button class="brief-btn" type="button" title="The top 3 commercial actions, summarised by Genie"><span class="bb-spark">✦</span> Top 3 actions</button>` : "";
+  v.innerHTML = `<div class="gfc-wrap"><div class="gfc-tabs">${cross.map(m => `<button class="gfc-tab ${m.key === active ? "active" : ""}" data-gfc="${m.key}">${m.label}</button>`).join("")}</div>${bb}</div><div id="gfc-body"><div class="placeholder">Loading…</div></div>`;
   raiseActiveRow(v.querySelector(".gfc-tabs"));
   v.querySelectorAll("[data-gfc]").forEach(b => b.onclick = () => renderLandscape(b.getAttribute("data-gfc"), which));
+  if (comm) {
+    v.querySelector(".brief-btn").onclick = () => openBriefing(true);
+    if (BRIEF_ON_ENTRY) { BRIEF_ON_ENTRY = false; maybeShowBriefing(); }   // opened from the menu: show the briefing unless snoozed
+  }
   if (active === "recommendations") renderRecommendations("#gfc-body");   // custom renderers (not a /api/module)
   else if (active === "weather") renderWeather("#gfc-body");
   else renderModuleInto("#gfc-body", active);
 }
+/* ---------- user preferences, kept per user in Lakebase (gas_twin.settings) ---------- */
+// The briefing choice (don't show again / show again in a week), the last report opened in each menu and the
+// folded groups in the 3D site list. Loaded once at start-up; each change is written back (debounced).
+let PREFS = {}, PREFS_READY = null;
+const _prefT = {};
+function loadPrefs() {
+  PREFS_READY = fetch("/api/settings").then(r => r.ok ? r.json() : null).then(d => {
+    PREFS = (d && d.settings) || {};
+    const lt = PREFS.last_tabs || {};   // reopen each menu on the report the user last had open
+    if (!GFC_CUR && lt.gas_flow_chain) GFC_CUR = lt.gas_flow_chain;
+    if (!GFC_CROSS && lt.analytics) GFC_CROSS = lt.analytics;
+    if (!GFC_COMM && lt.commercial) GFC_COMM = lt.commercial;
+    (PREFS.site_list_folded || []).forEach(k => SCENE_CLOSED.add(k));
+  }).catch(() => {});
+  return PREFS_READY;
+}
+function savePref(key, value) {
+  if (value == null) delete PREFS[key]; else PREFS[key] = value;
+  clearTimeout(_prefT[key]);
+  _prefT[key] = setTimeout(() => fetch("/api/settings/" + key, { method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: value == null ? null : value }) }).catch(() => {}), 400);
+}
+function rememberTab(menu, key) {
+  const lt = { ...(PREFS.last_tabs || {}) }; if (lt[menu] === key) return;
+  lt[menu] = key; savePref("last_tabs", lt);
+}
+
+/* ---------- Commercial & Finance briefing: the top 3 commercial actions ---------- */
+// Fetched quietly at start-up (no loader), so it opens instantly. The actions come from the
+// gld_commercial_actions mart; the summary is Genie's, prepared in the background by the server.
+let BRIEF = null, BRIEF_ON_ENTRY = false, _briefPoll = 0;
+function loadBrief() {
+  return fetch("/api/briefing/commercial").then(r => r.ok ? r.json() : null).then(d => {
+    if (d && d.actions && d.actions.length) BRIEF = d;
+    // Genie is still writing the summary: look again shortly (and refresh an open briefing in place)
+    if (BRIEF && BRIEF.pending && _briefPoll++ < 12) setTimeout(() => loadBrief().then(fillBriefSummary), 20000);
+    return BRIEF;
+  }).catch(() => BRIEF);
+}
+function briefSuppressed() {
+  const p = PREFS.commercial_briefing; if (!p) return false;
+  return p.mode === "never" || (p.mode === "snooze" && Date.parse(p.until) > Date.now());
+}
+async function maybeShowBriefing() { if (PREFS_READY) await PREFS_READY; if (!briefSuppressed()) openBriefing(false); }
+function briefSummaryHTML(b) {
+  const gen = b.summary_source === "genie";
+  return `<img class="bs-ic" src="img/genie.png" alt="" aria-hidden="true"><div><div class="bs-who">${gen ? "Genie's summary" : "In short"}</div>
+    <p>${escH(b.summary || "")}</p>${b.pending ? '<div class="bs-note">Genie is reviewing these actions; its summary will appear here.</div>' : ""}</div>`;
+}
+function fillBriefSummary() { const s = $(".brief .brief-sum"); if (s && BRIEF) s.innerHTML = briefSummaryHTML(BRIEF); }
+async function openBriefing(manual) {
+  if ($(".brief-veil")) return;
+  const b = BRIEF || await loadBrief();
+  if (!b || !b.actions || !b.actions.length) { if (manual) toast("The commercial briefing is not available yet."); return; }
+  const was = PREFS.commercial_briefing || null, mode = was && was.mode;
+  const veil = el(`<div class="brief-veil" role="presentation"><div class="brief" role="dialog" aria-modal="true" aria-labelledby="brief-t">
+      <button class="brief-x" type="button" aria-label="Close">✕</button>
+      <div class="brief-kick"><span class="bb-spark">✦</span> AI briefing</div>
+      <h2 id="brief-t">Top 3 commercial actions</h2>
+      <div class="brief-subt">Ranked by the money at stake across the Commercial &amp; Finance reports${b.data_as_of ? `, from data to ${fmtMD(b.data_as_of)} ${String(b.data_as_of).slice(0, 4)}` : ""}</div>
+      <div class="brief-sum">${briefSummaryHTML(b)}</div>
+      <ol class="brief-list">${b.actions.map((a, i) => `<li class="brief-item">
+          <span class="bi-n">${i + 1}</span>
+          <div class="bi-body"><div class="bi-h">${escH(a.action)}</div><div class="bi-d">${escH(a.detail)}</div>
+            <div class="bi-f"><span class="bi-v" title="${escAttr(a.value_basis || "")}">${escH(a.value_label || "")}</span>
+              <button class="bi-go" type="button" data-i="${i}">Open ${escH(a.module_label)} <span aria-hidden="true">→</span></button></div></div></li>`).join("")}</ol>
+      <div class="brief-foot">
+        <label class="bf-opt"><input type="checkbox" data-opt="never"${mode === "never" ? " checked" : ""}> Don't show this again</label>
+        <label class="bf-opt"><input type="checkbox" data-opt="snooze"${mode === "snooze" ? " checked" : ""}> Show it again in a week</label>
+        <button class="brief-ok" type="button">Got it</button>
+      </div></div></div>`);
+  document.body.appendChild(veil);
+  requestAnimationFrame(() => veil.classList.add("on"));
+  const boxes = [...veil.querySelectorAll("[data-opt]")];
+  boxes.forEach(x => x.onchange = () => { if (x.checked) boxes.forEach(y => { if (y !== x) y.checked = false; }); });   // one or the other
+  const close = () => {
+    const pick = (boxes.find(x => x.checked) || {}).getAttribute?.("data-opt") || null;
+    let val = null;
+    if (pick === "never") val = mode === "never" ? was : { mode: "never", set_at: new Date().toISOString() };
+    if (pick === "snooze") val = mode === "snooze" ? was : { mode: "snooze", until: new Date(Date.now() + 7 * 864e5).toISOString() };
+    if (JSON.stringify(val) !== JSON.stringify(was)) {
+      savePref("commercial_briefing", val);
+      if (val) { toast(val.mode === "never" ? "Saved. Bring the briefing back any time with ✦ Top 3 actions." : "Saved. It will show again in a week, or any time with ✦ Top 3 actions.");
+        const bt = $(".brief-btn"); if (bt) { bt.classList.remove("pulse"); void bt.offsetWidth; bt.classList.add("pulse"); } }
+    }
+    document.removeEventListener("keydown", onKey);
+    veil.classList.remove("on"); setTimeout(() => veil.remove(), 180);
+  };
+  const onKey = e => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  veil.querySelector(".brief-x").onclick = close;
+  veil.querySelector(".brief-ok").onclick = close;
+  veil.onclick = e => { if (e.target === veil) close(); };
+  veil.querySelectorAll(".bi-go").forEach(g => g.onclick = () => {   // open the report behind the action, its evidence highlighted
+    const a = b.actions[+g.getAttribute("data-i")];
+    close();
+    FOCUS = { key: a.module_key, level: "amber", ids: new Set(String(a.focus_ids || "").split("|").filter(Boolean)),
+              kpis: String(a.focus_kpis || "").split("|").filter(Boolean), text: `Briefing action ${a.rank || ""}: ${a.action}. ${a.detail} Highlighted below.` };
+    goTo(a.module_key);
+  });
+  veil.querySelector(".brief-ok").focus();
+}
+function toast(msg) {
+  const old = $(".toast"); if (old) old.remove();
+  const tt = el(`<div class="toast" role="status">${escH(msg)}</div>`); document.body.appendChild(tt);
+  requestAnimationFrame(() => tt.classList.add("on")); setTimeout(() => { tt.classList.remove("on"); setTimeout(() => tt.remove(), 300); }, 4200);
+}
+
 function roundsHTML() {
   return `<div class="card"><div class="card-h">Digital operator round (writes back to Lakebase)</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -759,6 +891,7 @@ async function renderNavigator() {
   v.querySelectorAll(".scene-sec .scene-grp").forEach(h => h.onclick = () => {   // collapse / expand a group
     const sec = h.parentElement, k = sec.getAttribute("data-grp"), shut = !sec.classList.contains("closed");
     sec.classList.toggle("closed", shut); h.setAttribute("aria-expanded", String(!shut)); if (shut) SCENE_CLOSED.add(k); else SCENE_CLOSED.delete(k);
+    savePref("site_list_folded", [...SCENE_CLOSED]);
   });
   v.querySelectorAll("[data-scene]").forEach(b => b.onclick = () => { v.querySelectorAll(".scene-item").forEach(x => x.classList.remove("active")); b.classList.add("active"); loadScene(b.getAttribute("data-scene")); });
   if (scenes.length) {
@@ -770,13 +903,13 @@ async function renderNavigator() {
     btn.classList.add("active"); loadScene(want);
     // open the site's group if it is folded and bring the site into view in the list
     const sec = btn.closest(".scene-sec");
-    if (sec && sec.classList.contains("closed")) { sec.classList.remove("closed"); sec.querySelector(".scene-grp").setAttribute("aria-expanded", "true"); SCENE_CLOSED.delete(sec.getAttribute("data-grp")); }
+    if (sec && sec.classList.contains("closed")) { sec.classList.remove("closed"); sec.querySelector(".scene-grp").setAttribute("aria-expanded", "true"); SCENE_CLOSED.delete(sec.getAttribute("data-grp")); savePref("site_list_folded", [...SCENE_CLOSED]); }
     btn.scrollIntoView({ block: "center" });
   }
 }
 // The site list, grouped along the gas path (well pads, offshore platforms, gathering hubs, offshore manifolds,
 // gas plants, custody), each site named with its place underneath, e.g. "Well pad BAR029" over "Surat Basin".
-const SCENE_CLOSED = new Set();   // site-list groups the user has collapsed (kept while moving between sites)
+const SCENE_CLOSED = new Set();   // site-list groups the user has collapsed (kept per user in Lakebase)
 function sceneListHTML(scenes) {
   const groups = [];
   scenes.forEach(s => { const k = s.kind || "Sites"; let g = groups.find(x => x.k === k); if (!g) groups.push(g = { k, items: [] }); g.items.push(s); });
@@ -1197,7 +1330,11 @@ function buildNav() {
     if (g === "Commercial") return navBtn("commercial_landscape", "Commercial & Finance");
     return items.map(n => navBtn(n.key, n.label)).join("");
   }).join("");
-  $("#nav").querySelectorAll("[data-key]").forEach(b => b.onclick = () => select(b.getAttribute("data-key")));
+  $("#nav").querySelectorAll("[data-key]").forEach(b => b.onclick = () => {
+    const k = b.getAttribute("data-key");
+    if (k === "commercial_landscape" && CUR !== k) BRIEF_ON_ENTRY = true;   // entering Commercial & Finance from the menu
+    select(k);
+  });
   $("#nav").addEventListener("scroll", placeTail);
 }
 let GENIE_URL;
@@ -1262,6 +1399,8 @@ async function boot() {
     const k = e.target.closest(".kpi[data-link]"); if (k) { goTo(k.getAttribute("data-link")); return; }
   });
   loadFreshness();
+  loadPrefs();
+  setTimeout(loadBrief, 1200);   // ready the briefing before Commercial & Finance is opened
   try { NAV = await getJSON("/api/modules"); } catch (e) { $("#view").innerHTML = '<div class="placeholder">Could not load modules.</div>'; return; }
   buildNav();
   select("command_centre");

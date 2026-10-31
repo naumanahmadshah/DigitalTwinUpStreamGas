@@ -804,3 +804,167 @@ def gld_supply_nodes():
                     om[F.col("stop")].cast("int").alias("stop_order"), F.coalesce("b_o", "b_i").alias("basin"),
                     F.round("tp", 1).alias("throughput_e3m3d"), F.round(F.col("tp") * GJ_PER_E3M3 / 1000.0, 2).alias("throughput_tj_d"),
                     F.coalesce(F.col("s"), F.lit("green")).alias("status"))
+
+
+# ===== GLD commercial actions: the top moves across the Commercial & Finance reports ==========
+# One candidate action per commercial lever (deferment, capital, contract supply, contract price, carbon,
+# methane), each valued on one common basis (AUD at stake per year), then ranked. The App's Commercial &
+# Finance briefing shows the top three and Genie explains them. Pure DataFrame logic (no driver collects).
+def _money(c):
+    """Human dollars for action text: $108M, $4.2M, $95k."""
+    a = F.abs(c)
+    return (F.when(a >= 1e9, F.format_string("$%.1fB", c / 1e9)).when(a >= 1e8, F.format_string("$%.0fM", c / 1e6))
+            .when(a >= 1e6, F.format_string("$%.1fM", c / 1e6)).when(a >= 1e3, F.format_string("$%.0fk", c / 1e3))
+            .otherwise(F.format_string("$%.0f", c)))
+
+
+def _site_name(c):
+    """A site's name for a sentence: drop the '(place, basin)' suffix; lower-case a generic lead ('well pad ...')."""
+    s = F.regexp_replace(c, r"\s*\([^)]*\)\s*$", "")
+    return F.when(s.rlike("^(Well pad|Wellhead platform|Gathering hub|Manifold)"),
+                  F.concat(F.lower(F.substring(s, 1, 1)), F.substring(s, 2, 200))).otherwise(s)
+
+
+def _day(c):
+    return F.date_format(F.to_date(c), "d MMMM yyyy")
+
+
+@dp.table(name="gld_commercial_actions",
+          comment="Top commercial actions: one candidate per commercial lever (recover the largest deferment cause, approve the best-paying capital project, close the supply gap on short contracts, re-price an under-market contract at renewal, cover the Safeguard shortfall, repair methane leaks), each valued as AUD at stake per year and ranked. Serves the App's Commercial & Finance briefing (top 3) and Genie's commercial-actions answers. Advisory only.",
+          schema="""rank INT COMMENT 'Rank by value at stake (1 = the most valuable action).',
+          lever STRING COMMENT 'Commercial lever: deferment, capital, contract_supply, contract_price, carbon or methane.',
+          action STRING COMMENT 'The action, as an imperative headline.',
+          detail STRING COMMENT 'Why: the evidence behind the action, with its figures.',
+          value_dollars_yr DOUBLE COMMENT 'Value at stake (AUD per year) on the basis in value_basis; the common ranking currency.',
+          value_basis STRING COMMENT 'How value_dollars_yr is worked out.',
+          module_key STRING COMMENT 'App report where the evidence lives (opened from the briefing).',
+          module_label STRING COMMENT 'Name of that report.',
+          focus_ids STRING COMMENT 'Ids to highlight on that report (rows, bars), separated by |.',
+          focus_kpis STRING COMMENT 'KPI tile labels (lower-case fragments) to highlight on that report, separated by |.',
+          data_as_of STRING COMMENT 'Latest gas day in the data behind the actions.'""")
+def gld_commercial_actions():
+    sites = spark.read.table("gld_sites").select("area_code", _site_name(F.col("name")).alias("site"))
+    asof = spark.read.table("gld_economics").agg(F.max("gas_day").cast("string").alias("data_as_of"))
+
+    # 1. deferment: the cause that lost the most money in the last 30 gas days, where most of it happened
+    d = _last_days(spark.read.table("gld_deferment"), 30)
+    tot = d.agg(F.sum("deferred_dollars").alias("tot"))
+    cause = (d.groupBy("cause_code", "cause_desc").agg(F.sum("deferred_dollars").alias("usd"))
+             .withColumn("_r", F.row_number().over(W.orderBy(F.desc("usd")))).where("_r = 1").drop("_r"))
+    at = (d.join(cause.select("cause_code"), "cause_code").groupBy("area_code").agg(F.sum("deferred_dollars").alias("site_usd"))
+          .withColumn("_r", F.row_number().over(W.orderBy(F.desc("site_usd")))).where("_r = 1").drop("_r").join(sites, "area_code", "left"))
+    ids = d.join(cause.select("cause_code"), "cause_code").agg(F.concat_ws("|", F.array_distinct(F.collect_list("asset_id"))).alias("aids"))
+    short = F.regexp_replace(F.col("cause_desc"), r"\s*\([^)]*\)\s*$", "")
+    head = (F.when(F.col("cause_code") == "COMP-CONSTRAINT", F.lit("Restore compression capacity at "))
+            .when(F.col("cause_code") == "WELL-TRIP", F.lit("Stop the repeat well trips at "))
+            .when(F.col("cause_code") == "WELL-LL", F.lit("Unload the liquid-loading wells at "))
+            .when(F.col("cause_code") == "RES-DECL", F.lit("Re-plan the declining wells at "))
+            .when(F.col("cause_code") == "UNPLANNED-SD", F.lit("Fix the causes of unplanned shutdowns at "))
+            .otherwise(F.lit("Recover the deferred gas at ")))
+    where = F.when(F.col("site_usd") >= F.col("usd") * 0.995, F.concat(F.lit("all of it at "), F.coalesce("site", "area_code")))\
+             .otherwise(F.concat(_money(F.col("site_usd")), F.lit(" of it at "), F.coalesce("site", "area_code")))
+    defer = (cause.crossJoin(tot).crossJoin(at).crossJoin(ids).select(
+        F.lit("deferment").alias("lever"),
+        F.concat(head, F.coalesce("site", "area_code")).alias("action"),
+        F.format_string("%s deferred %s of gas in the last 30 days (%d%% of all deferment), %s. Recovering it is worth about %s a year.",
+                        short, _money(F.col("usd")), F.round(F.col("usd") / F.col("tot") * 100).cast("int"), where,
+                        _money(F.col("usd") * 365 / 30)).alias("detail"),
+        (F.col("usd") * 365 / 30).alias("value_dollars_yr"),
+        F.lit("This cause's deferment over the last 30 gas days, annualised").alias("value_basis"),
+        F.lit("deferment").alias("module_key"), F.lit("Deferment & Losses").alias("module_label"),
+        F.concat_ws("|", F.col("cause_desc"), F.col("aids")).alias("focus_ids"),
+        F.lit("total deferment").alias("focus_kpis")))
+
+    # 2. capital: the most valuable project that pays back inside a year but is not yet approved
+    cp = (spark.read.table("gld_capital_plan").where(F.col("status").isin("proposed", "fel-2") & (F.col("payback_years") < 1))
+          .withColumn("_r", F.row_number().over(W.orderBy(F.desc("annual_value_dollars")))).where("_r = 1").drop("_r")
+          .join(sites, "area_code", "left"))
+    stage = F.when(F.col("status") == "fel-2", F.lit("at FEL-2 (concept select)")).otherwise(F.lit("only proposed"))
+    capital = cp.select(
+        F.lit("capital").alias("lever"),
+        F.concat(F.lit("Approve "), F.col("project_id"), F.lit(", the "), F.regexp_replace("project_type", "_", " "),
+                 F.lit(" at "), F.coalesce("site", "area_code")).alias("action"),
+        F.format_string("%s of capex adds %.0f ×10³ m³/d of gas, worth %s a year, and pays back in %.1f months. It is still %s, with a planned start of %s.",
+                        _money(F.col("capex_dollars")), F.col("expected_uplift_e3m3d"), _money(F.col("annual_value_dollars")),
+                        F.col("payback_years") * 12, stage, _day(F.col("planned_date"))).alias("detail"),
+        F.col("annual_value_dollars").alias("value_dollars_yr"),
+        F.lit("The project's annual value: its expected uplift at today's gas price").alias("value_basis"),
+        F.lit("capital_plan").alias("module_key"), F.lit("Capital & Decline-Aware Investment").alias("module_label"),
+        F.col("project_id").alias("focus_ids"), F.lit("expected uplift").alias("focus_kpis"))
+
+    # 3. contract supply: firm contracts that received less than they nominated over the last 30 gas days
+    cs = spark.read.table("gld_customer_supply")
+    gap = (cs.where(F.col("contract_type") != "Spot").withColumn("gap_tj", F.col("nominated_tj_d") - F.col("delivered_tj_d"))
+           .where("gap_tj > 0.3").withColumn("usd_yr", F.col("gap_tj") * 1000 * F.col("price_gj") * 365))
+    gsum = gap.agg(F.count("*").alias("n"), F.sum("gap_tj").alias("gap_all"), F.sum("usd_yr").alias("usd_all"),
+                   F.concat_ws("|", F.collect_list("contract_id"), F.collect_list("customer_name")).alias("cids"))
+    gtop = gap.withColumn("_r", F.row_number().over(W.orderBy(F.desc("usd_yr")))).where("_r = 1").drop("_r")
+    supply = gtop.crossJoin(gsum).select(
+        F.lit("contract_supply").alias("lever"),
+        F.when(F.col("n") > 1, F.format_string("Close the supply gap on %d contracts, led by %s (%s)", F.col("n"), F.col("customer_name"), F.col("contract_id")))
+         .otherwise(F.format_string("Close the supply gap on %s (%s)", F.col("customer_name"), F.col("contract_id"))).alias("action"),
+        F.format_string("%s nominated %.1f TJ/d more than it received over the last 30 days (short on %d days). Across %d contracts the field is %.1f TJ/d behind nominations: about %s a year of sales and shortfall exposure.",
+                        F.col("customer_name"), F.col("gap_tj"), F.col("shortfall_days_30d"), F.col("n"), F.col("gap_all"),
+                        _money(F.col("usd_all"))).alias("detail"),
+        F.col("usd_all").alias("value_dollars_yr"),
+        F.lit("Nominated gas not delivered over the last 30 gas days, at each contract's price, annualised").alias("value_basis"),
+        F.lit("commercial").alias("module_key"), F.lit("Commercial & Prices").alias("module_label"),
+        F.col("cids").alias("focus_ids"), F.lit("delivery vs nomination").alias("focus_kpis"))
+
+    # 4. contract price: the firm contract ending inside 18 months that sells furthest below the spot market
+    mkt = cs.where(F.col("contract_type") == "Spot").agg(F.avg("price_gj").alias("mkt"))
+    rp = (cs.where(F.col("contract_type") != "Spot").crossJoin(mkt)
+          .withColumn("days_left", F.datediff(F.to_date("contract_end"), F.to_date("as_of_day")))
+          .where((F.col("days_left").between(0, 548)) & (F.col("price_gj") < F.col("mkt") - 0.25))
+          .withColumn("usd_yr", (F.col("mkt") - F.col("price_gj")) * F.col("delivered_tj_d") * 1000 * 365)
+          .withColumn("_r", F.row_number().over(W.orderBy(F.desc("usd_yr")))).where("_r = 1").drop("_r"))
+    price = rp.select(
+        F.lit("contract_price").alias("lever"),
+        F.format_string("Re-price %s (%s) at renewal", F.col("customer_name"), F.col("contract_id")).alias("action"),
+        F.format_string("The contract sells at $%.2f/GJ, $%.2f below today's spot market of $%.2f/GJ, and ends on %s (%d months away). Renewing at market adds about %s a year.",
+                        F.col("price_gj"), F.col("mkt") - F.col("price_gj"), F.col("mkt"), _day(F.col("contract_end")),
+                        F.round(F.col("days_left") / 30.4).cast("int"), _money(F.col("usd_yr"))).alias("detail"),
+        F.col("usd_yr").alias("value_dollars_yr"),
+        F.lit("Gap to the spot price x the contract's delivered volume, per year").alias("value_basis"),
+        F.lit("commercial").alias("module_key"), F.lit("Commercial & Prices").alias("module_label"),
+        F.concat_ws("|", F.col("contract_id"), F.col("customer_name")).alias("focus_ids"), F.lit("sales gas price").alias("focus_kpis"))
+
+    # 5. carbon: this year's Safeguard shortfall, annualised from the days reported so far
+    cc = spark.read.table("gld_carbon_compliance")
+    yr = cc.agg(F.max("reporting_year").alias("yr"))
+    doy = (spark.read.table("gld_emissions_ledger").withColumn("y", F.year("gas_day")).join(yr, F.col("y") == F.col("yr"))
+           .agg(F.dayofyear(F.max("gas_day")).alias("doy")))
+    over = cc.join(yr, cc["reporting_year"] == yr["yr"]).where("position_t > 0").drop("yr").join(sites, cc["facility"] == sites["area_code"], "left")
+    osum = over.agg(F.count("*").alias("n"), F.sum("position_t").alias("t"), F.sum("accu_cost_dollars").alias("usd"),
+                    F.concat_ws("|", F.collect_list("facility")).alias("fids"), F.max("reporting_year").alias("ry"))
+    otop = over.withColumn("_r", F.row_number().over(W.orderBy(F.desc("accu_cost_dollars")))).where("_r = 1").drop("_r")
+    carbon = otop.crossJoin(osum).crossJoin(doy).select(
+        F.lit("carbon").alias("lever"),
+        F.format_string("Cover the Safeguard shortfall at %d facilities, led by %s", F.col("n"), F.coalesce("site", "facility")).alias("action"),
+        F.format_string("%d facilities are %s t CO₂-e over their Safeguard baselines so far in %d. Covering that with ACCUs costs about %s a year at today's carbon price; %s is the largest at %s so far.",
+                        F.col("n"), F.format_number(F.col("t"), 0), F.col("ry"), _money(F.col("usd") * 365 / F.col("doy")),
+                        F.coalesce("site", "facility"), _money(F.col("accu_cost_dollars"))).alias("detail"),
+        (F.col("usd") * 365 / F.col("doy")).alias("value_dollars_yr"),
+        F.lit("ACCU cost of this year's shortfall so far, annualised").alias("value_basis"),
+        F.lit("emissions").alias("module_key"), F.lit("Emissions, Carbon & Safeguard").alias("module_label"),
+        F.col("fids").alias("focus_ids"), F.lit("accu cost|position vs baseline").alias("focus_kpis"))
+
+    # 6. methane: components flagged by LDAR, valued as the gas kept for sale once repaired
+    ld = spark.read.table("gld_methane_ldar").where(F.col("survey_status").isin("investigate", "monitor"))
+    lsum = ld.agg(F.count("*").alias("n"), F.sum("product_value_dollars_yr").alias("usd"), F.sum("co2e_t_yr").alias("t"),
+                  F.concat_ws("|", F.slice(F.array_sort(F.collect_list(F.struct((-F.col("product_value_dollars_yr")).alias("k"), F.col("asset_id").alias("a")))), 1, 25).getField("a")).alias("aids"))
+    methane = lsum.where("n > 0").select(
+        F.lit("methane").alias("lever"),
+        F.format_string("Repair the methane leaks on %d components", F.col("n")).alias("action"),
+        F.format_string("Leak detection has flagged %d components. Repairing them keeps about %s a year of gas for sale and avoids %s t CO₂-e a year.",
+                        F.col("n"), _money(F.col("usd")), F.format_number(F.col("t"), 0)).alias("detail"),
+        F.col("usd").alias("value_dollars_yr"),
+        F.lit("Market value of the escaping gas, per year").alias("value_basis"),
+        F.lit("methane_ldar").alias("module_key"), F.lit("Methane LDAR").alias("module_label"),
+        F.col("aids").alias("focus_ids"), F.lit("investigate").alias("focus_kpis"))
+
+    allc = defer.unionByName(capital).unionByName(supply).unionByName(price).unionByName(carbon).unionByName(methane)
+    return (allc.withColumn("rank", F.row_number().over(W.orderBy(F.desc("value_dollars_yr")))).crossJoin(asof)
+            .select(F.col("rank").cast("int").alias("rank"), "lever", "action", "detail", F.round("value_dollars_yr", 0).alias("value_dollars_yr"),
+                    "value_basis", "module_key", "module_label", "focus_ids", "focus_kpis", "data_as_of")
+            .orderBy("rank"))

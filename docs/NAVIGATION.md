@@ -52,9 +52,9 @@ back at it like a speech bubble.
      **bottleneck** (the single asset putting the most production at risk), then two icons: the
      **Field Map** and **Impact analysis**.
    - The value chain as five pictures (Reservoir, Wells, Gathering, Processing, Custody). The stop
-     under the most pressure is red with its production at risk; the one to watch (the next most at
-     risk) is amber, with its production at risk in amber; the others show just their name. Hover a
-     picture for what its colour means.
+     under the most pressure is red, with a hopping comic-style red exclamation mark beside its picture;
+     the one to watch (the next most at risk) is amber, with an amber mark. Any of the five can be flagged, following the live
+     constraint ranking. Hover a picture for why, with its production at risk.
    - **Click anything red or amber** (a stop, the bottleneck, or the difference from commitment when
      it is below): the screen where the cause lives opens with a banner saying why, and the cause
      coloured to match: its table rows (moved to the top), chart bars, chart lines and KPI tiles.
@@ -167,6 +167,20 @@ back at it like a speech bubble.
      remaining life.
 
 7. **Commercial & Finance** (the dollar-and-chart icon):\
+   Opening it from the menu first shows the **AI briefing**, a box over the blurred tabs:
+   - *Top 3 commercial actions:* one action per commercial lever (recover the biggest deferment cause,
+     approve the best-paying capital project, close the supply gap on short contracts, re-price an
+     under-market contract at renewal, cover the Safeguard shortfall, repair methane leaks), ranked by the
+     money at stake per year (hover the green figure for how it is worked out). Each has the evidence and an
+     **Open …** link that opens its report with the cause highlighted, as the Command Centre does.
+   - *Genie's summary:* Genie writes it in the background (the conversation API) and Lakebase caches it,
+     so it is ready before you open the menu; Genie is asked again only when the actions change. Until its
+     summary is in, a short summary worked out from the same actions is shown.
+   - *Don't show this again* / *Show it again in a week* (ticking one clears the other), then **Got it**,
+     ✕, Esc or a click outside. The choice is saved for you in Lakebase.
+   - *Bring it back:* the **✦ Top 3 actions** button at the top right of the tabs opens it any time, with
+     your choice ticked; clear the tick to have it show on entry again.
+
    The money reports as folder tabs:
    - *Deferment & Losses:*\
      Total deferment in dollars and gas, by coded cause and by day; deferment by
@@ -176,7 +190,8 @@ back at it like a speech bubble.
    - *Commercial & Prices:*\
      Last month's sale revenue, cost of generation, profit, carbon and water
      disposal cost, the sales gas price and delivery vs nomination; monthly revenue, cost and profit;
-     the price trend; the daily commercial ledger.
+     the price trend; the daily commercial ledger; and the contract book (price, MDQ, take-or-pay,
+     nominated vs delivered, short days and contract end for every buyer).
    - *Molecule-to-Market Margin:*\
      Netback (dollars and per GJ), take-or-pay shortfall days, their
      trends and the daily margin and commitment ledger.
@@ -204,10 +219,14 @@ back at it like a speech bubble.
   gold mart the app shows is a Lakebase synced table, refreshed right after the medallion and then every
   5 minutes by the "Lakebase sync" job, so the app's numbers can trail a fresh medallion run by up to
   5 minutes. The compute scales to zero when idle, so the first screen after a quiet spell takes a moment.
+  It also keeps what the app writes: recommendation decisions, each user's preferences (gas_twin.settings:
+  the briefing choice, the report last opened in each menu, the folded groups in the 3D site list) and
+  Genie's cached commercial briefing (gas_twin.ai_briefings).
 
 - **Asset Intelligence Genie** (in Databricks One):\
   Ask questions in plain language over the gold
-  marts, including the customer and supply-network marts.
+  marts, including the customer, supply-network and commercial-actions marts. "What are the top 3
+  commercial actions we should take now, and why?" gives the same actions as the app's briefing.
 - **AI/BI dashboard "Gas Upstream Digital Twin"** (Dashboards):\
   Five pages, Field Command Centre,
   Wells & Lift, Compression Health, Deferment & Emissions, and Custody & UAF.

@@ -4,7 +4,8 @@ Runs right after the medallion. Idempotent: safe to re-run at any time.
   1. One Lakebase synced table per gold mart the App reads (SNAPSHOT mode, all bin-packed into ONE
      sync pipeline). Each lands in Postgres as <serving_schema>.<mart>, same name as the gold mart.
   2. Runs that sync pipeline now and waits for every synced table to come online.
-  3. The write-back tables (recommendation decisions, operator rounds), seeded from gold.
+  3. The write-back tables (recommendation decisions, operator rounds), seeded from gold, plus the per-user
+     settings table (app preferences) and the AI briefing cache (Genie's commercial summary).
   4. Grants the App's service principal read on the synced marts and read/write on the write-back.
   5. A scheduled job that re-runs the sync pipeline every few minutes (default every 5 minutes).
      A snapshot sync skips a mart whose gold source has not changed, so an idle run is short.
@@ -25,6 +26,7 @@ SYNC = {
     "gld_capital_plan": ["project_id"],
     "gld_carbon_compliance": ["facility", "reporting_year"],
     "gld_commercial": ["gas_day"],
+    "gld_commercial_actions": ["lever"],
     "gld_compression_health": ["asset_id", "gas_day"],
     "gld_constraint_ranking": ["asset_id", "constraint_type"],
     "gld_custody_allocation": ["asset_id", "gas_day"],
@@ -94,6 +96,39 @@ CREATE TABLE IF NOT EXISTS gas_twin.operator_rounds (
   round_id bigserial PRIMARY KEY, asset_id text, observation text, flag text,
   observed_by text, observed_at timestamptz DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS gas_twin.settings (
+  user_email text NOT NULL,
+  setting_key text NOT NULL,
+  setting_value jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_email, setting_key)
+);
+COMMENT ON TABLE gas_twin.settings IS 'Per-user app preferences, one row per user per setting, written by the App. Holds the Commercial & Finance briefing choice (do not show again / show again in a week), the last report opened in each menu and the folded groups in the 3D site list, so the app remembers them across sessions and devices.';
+COMMENT ON COLUMN gas_twin.settings.user_email IS 'The signed-in user (the e-mail the Databricks Apps proxy forwards).';
+COMMENT ON COLUMN gas_twin.settings.setting_key IS 'Which preference: commercial_briefing, last_tabs or site_list_folded.';
+COMMENT ON COLUMN gas_twin.settings.setting_value IS 'The preference value as JSON, e.g. {"mode": "snooze", "until": "2026-11-07T09:00:00Z"}.';
+COMMENT ON COLUMN gas_twin.settings.updated_at IS 'When the user last changed it.';
+CREATE TABLE IF NOT EXISTS gas_twin.ai_briefings (
+  briefing_key text PRIMARY KEY,
+  data_as_of text,
+  content_hash text,
+  summary text,
+  source text,
+  genie_conversation_id text,
+  generated_at timestamptz,
+  last_attempt_at timestamptz,
+  last_error text
+);
+COMMENT ON TABLE gas_twin.ai_briefings IS 'AI briefings prepared ahead of time by the App: Genie''s summary of the top commercial actions (gld_commercial_actions), cached so the Commercial & Finance briefing opens instantly and Genie is asked again only when the actions change.';
+COMMENT ON COLUMN gas_twin.ai_briefings.briefing_key IS 'Which briefing (commercial_top_actions).';
+COMMENT ON COLUMN gas_twin.ai_briefings.data_as_of IS 'Latest gas day in the data the briefing was written from.';
+COMMENT ON COLUMN gas_twin.ai_briefings.content_hash IS 'Fingerprint of the ranked actions the summary describes; a new fingerprint triggers a fresh Genie answer.';
+COMMENT ON COLUMN gas_twin.ai_briefings.summary IS 'Genie''s plain-prose summary of the top three actions.';
+COMMENT ON COLUMN gas_twin.ai_briefings.source IS 'Who wrote the summary: genie.';
+COMMENT ON COLUMN gas_twin.ai_briefings.genie_conversation_id IS 'The Genie conversation the summary came from.';
+COMMENT ON COLUMN gas_twin.ai_briefings.generated_at IS 'When Genie wrote the summary.';
+COMMENT ON COLUMN gas_twin.ai_briefings.last_attempt_at IS 'When the App last asked Genie (successfully or not).';
+COMMENT ON COLUMN gas_twin.ai_briefings.last_error IS 'The last Genie error, if the latest attempt failed (the previous summary is kept).';
 """
 
 # Spark SQL's ROUND(double, n) has no Postgres equivalent (Postgres rounds only numeric to n places).
@@ -253,12 +288,14 @@ def main():
                      f'GRANT USAGE ON SCHEMA gas_twin TO "{app_sp}"',
                      f'GRANT SELECT, INSERT, UPDATE ON gas_twin.recommendation_decisions TO "{app_sp}"',
                      f'GRANT SELECT, INSERT ON gas_twin.operator_rounds TO "{app_sp}"',
+                     f'GRANT SELECT, INSERT, UPDATE, DELETE ON gas_twin.settings TO "{app_sp}"',
+                     f'GRANT SELECT, INSERT, UPDATE ON gas_twin.ai_briefings TO "{app_sp}"',
                      f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA gas_twin TO "{app_sp}"'):
             try:
                 cur.execute(stmt)
             except Exception as e:
                 log("grant note:", stmt[:70], str(e)[:160])
-        log("granted the App read on the marts and read/write on the write-back")
+        log("granted the App read on the marts and read/write on the write-back, settings and briefing tables")
     conn.close()
 
     # ---- 5. scheduled re-sync -------------------------------------------------------------------

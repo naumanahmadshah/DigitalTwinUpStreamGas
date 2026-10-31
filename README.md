@@ -48,8 +48,10 @@ location, live value and its ids in every other system (PI historian, EAM, OSDU,
   the AI/BI dashboard read **gold** here, through a SQL warehouse.
 - **Lakebase:**\
   Every gold mart the app reads is synced into Postgres (schema digital_twin_app, same
-  table names as gold). The app reads **only** Lakebase and writes recommendation decisions back to it;
-  it has no SQL warehouse.
+  table names as gold). The app reads data **only** from Lakebase and writes back to it: recommendation
+  decisions, each user's preferences (gas_twin.settings) and Genie's cached briefing (gas_twin.ai_briefings).
+  It never queries a SQL warehouse itself; in the background it asks Genie (which does) to summarise the
+  top commercial actions.
 - **Freshness:**\
   The sync runs right after each medallion load (in the deploy) and then every 5 minutes.
   A mart whose gold has not changed is skipped, so an idle sync run is short.
@@ -96,9 +98,9 @@ the site-condition odds).
 | **Data generator** | A serverless job that builds the semantic backbone and backfills telemetry, events, work orders, lab assays, weather, prices, spares and more. |
 | **Medallion pipeline** | A serverless Lakeflow (DLT) pipeline: bronze (raw) to silver (conformed) to gold (curated marts). |
 | **The app** | "Databricks Asset Atlas": a FastAPI + single-page application: Command Centre, reservoir-to-customer impact analysis (with PDF export), Field Map, site views, the Gas flow chain, Analytics and Commercial & Finance tabs, a human-in-the-loop recommendation inbox, an asset explorer, and a link to Genie. |
-| **Genie space** | "Asset Intelligence Genie": a curated natural-language analytics space over the gold marts only, opened in Databricks One from the app's lamp icon. |
+| **Genie space** | "Asset Intelligence Genie": a curated natural-language analytics space over the gold marts only, opened in Databricks One from the app's lamp icon. The app's service principal can also ask it questions: the app uses the Genie conversation API in the background to write the Commercial & Finance briefing. |
 | **AI/BI dashboard** | A published dashboard, "Gas Upstream Digital Twin", with five pages: Field Command Centre, Wells & Lift, Compression Health, Deferment & Emissions, Custody & UAF. |
-| **Lakebase** | A Lakebase Autoscaling project (0.5 to 4 CU, scales to zero after 5 idle minutes): the app's **only** database. Every gold mart the app reads is a Lakebase synced table (one sync pipeline), refreshed straight after the medallion and then every 5 minutes by the "Lakebase sync" job; recommendation decisions are written back to it. |
+| **Lakebase** | A Lakebase Autoscaling project (0.5 to 4 CU, scales to zero after 5 idle minutes): the app's **only** database. Every gold mart the app reads is a Lakebase synced table (one sync pipeline), refreshed straight after the medallion and then every 5 minutes by the "Lakebase sync" job. The app writes back recommendation decisions, per-user preferences (gas_twin.settings) and Genie's commercial briefing (gas_twin.ai_briefings). |
 
 ---
 
@@ -191,8 +193,16 @@ Recommendation Inbox and Asset Explorer. A short tour follows; the full screen-b
   Assay, Weather (a per-site weather map), Produced Water, Fuel Gas & Energy, Methane LDAR, and Spares &
   Procurement (what to procure, lead time vs remaining life).
 - **Commercial & Finance:**\
-  The money reports as tabs: Deferment & Losses, Cost & Economics, Commercial & Prices,
-  Molecule-to-Market Margin (netback and take-or-pay) and Capital & Decline-Aware Investment.
+  The money reports as tabs: Deferment & Losses, Cost & Economics, Commercial & Prices (now with the
+  contract book), Molecule-to-Market Margin (netback and take-or-pay) and Capital & Decline-Aware Investment.
+  Opening it from the menu shows an **AI briefing** over a blurred background: the top 3 commercial
+  actions (from the gld_commercial_actions mart, ranked by money at stake per year) with Genie's summary,
+  each with a link to its report and the evidence highlighted. "Don't show this again" and "Show it again
+  in a week" (one or the other) are saved per user in Lakebase; the **✦ Top 3 actions** button brings it
+  back any time. The briefing is prepared ahead (server-side and fetched at start-up), so it opens instantly.
+- **Your preferences:**\
+  Kept per user in Lakebase (gas_twin.settings): the briefing choice, the report last opened in each
+  menu (each menu reopens there) and the folded groups in the 3D site list.
 - **Recommendation Inbox:**\
   Prescriptive recommendations with their evidence and linked open work
   orders: accept / reject / annotate, written back and audited to Lakebase, with Undo.
@@ -279,9 +289,9 @@ data generation, the first medallion run and the first Lakebase sync.
 6. **Generate the data** (the longest step).
 7. Run the medallion pipeline (bronze to silver to gold).
 8. Land the gold marts in Lakebase: create the synced tables and sync them (about 8 to 10 minutes the
-   first time), seed the recommendation write-back table, grant the app, and schedule the 5-minute
-   re-sync job.
-9. Build the Genie space and the dashboard.
+   first time), seed the recommendation write-back table, create the settings and briefing tables, grant
+   the app, and schedule the 5-minute re-sync job.
+9. Build the Genie space (and let the app's service principal ask it questions) and the dashboard.
 10. Start the app and wire it to Genie and Lakebase.
 
 ---

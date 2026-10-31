@@ -38,12 +38,12 @@ resources:
     # ---- Surfaces: Genie space + AI/BI dashboard over the gold marts -----------------------
     surfaces:
       name: "[${var.catalog}.${var.schema}] Gas Twin - Surfaces (Genie + dashboard)"
-      description: Builds the curated Genie space and the AI/BI dashboard. Run after the medallion.
+      description: Builds the curated Genie space (and lets the app ask it questions) and the AI/BI dashboard. Run after the medallion.
       tasks:
         - task_key: genie_space
           spark_python_task:
             python_file: ../serving/build_genie.py
-            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}"]
+            parameters: ["--catalog", "${var.catalog}", "--schema", "${var.schema}", "--app-name", "${var.app_name}"]
           environment_key: surfaces_env
         - task_key: dashboard
           spark_python_task:
